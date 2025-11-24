@@ -140,14 +140,17 @@ class DataAccessTracker:
         if not self.access_log:
             return pd.DataFrame()
 
-        # Group by dataset
         df = pd.DataFrame(self.access_log)
 
         report_data = []
         for dataset_name in df["dataset"].unique():
             access_count, warning_level, accesses = self.analyze_contamination(dataset_name)
 
-            purposes = df[df["dataset"] == dataset_name]["purpose"].value_counts().to_dict()
+            # Extract purposes from the already-filtered accesses
+            purposes = pd.Series([a["purpose"] for a in accesses]).value_counts().to_dict()
+
+            # Extract timestamps from the already-filtered accesses
+            timestamps = [a["timestamp"] for a in accesses]
 
             report_data.append(
                 {
@@ -158,8 +161,8 @@ class DataAccessTracker:
                     "test_accesses": purposes.get("test", 0),
                     "validate_accesses": purposes.get("validate", 0),
                     "optimize_accesses": purposes.get("optimize", 0),
-                    "first_access": df[df["dataset"] == dataset_name]["timestamp"].min(),
-                    "last_access": df[df["dataset"] == dataset_name]["timestamp"].max(),
+                    "first_access": min(timestamps) if timestamps else None,
+                    "last_access": max(timestamps) if timestamps else None,
                 }
             )
 
