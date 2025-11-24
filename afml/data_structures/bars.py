@@ -183,7 +183,7 @@ def make_bars(
         msg = f"{nzeros:,} of {nrows:,} ({nzeros / nrows:.2%}) rows with zero tick volume."
         ohlc_df = ohlc_df[~eq_zero]
         if nzeros > 0:
-            logger.info(f"Forward filled {msg}")
+            logger.info(f"Dropped {msg}")
     else:
         ohlc_df.index = bar_group["time"].last() + pd.Timedelta(
             microseconds=1
