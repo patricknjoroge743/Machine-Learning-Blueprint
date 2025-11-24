@@ -7,3 +7,8 @@ Markdown Headers
 --------------------
 Find: ^(#{1,6})\s+\*\*(.*?)\*\*\s*$
 Replace: $1 $2
+
+Remove "strong" tag from Headers
+--------------------------------
+Find: (<h([1-6])\b[^>]*>)\s*<strong>(.*?)</strong>\s*</h\2>
+Replace: $1$3</h$2>

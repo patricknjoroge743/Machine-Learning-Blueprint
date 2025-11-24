@@ -11,6 +11,7 @@ cover/
 *.log
 *.png
 *.html
+*.json
 *.jsonl
 */.ipynb_checkpoints/*
 afml.egg-info/*
@@ -23,3 +24,6 @@ bash/
 */logs/*
 */GA_logs_triple_barrier/*
 */feature_importance_charts/*
+mlruns/
+articles/
+tools/

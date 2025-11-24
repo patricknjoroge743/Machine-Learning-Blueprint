@@ -50,18 +50,18 @@ def clean_tick_data(
     df = df[price_filter]
 
     if df.isna().any().sum() > 0:
-        print(f"Dropped NA values: \n{df.isna().sum()}")
+        logger.info(f"Dropped NA values: \n{df.isna().sum()}")
         df.dropna(inplace=True)
 
     # 4. Microsecond handling (preserve even if 0)
     if not df.index.microsecond.any():
-        print("Warning: No timestamps with microsecond precision found")
+        logger.warning("No timestamps with microsecond precision found")
 
     # 5. Advanced duplicate handling
     duplicate_mask = df.index.duplicated(keep="last")
     dup_count = duplicate_mask.sum()
     if dup_count > 0:
-        print(f"Removed {dup_count:,} duplicate timestamps")
+        logger.info(f"Removed {dup_count:,} duplicate timestamps")
         df = df[~duplicate_mask]
 
     # 6. Chronological order with efficient sorting
@@ -70,13 +70,13 @@ def clean_tick_data(
 
     # 7. Final validation
     if df.empty:
-        print("Warning: DataFrame empty after cleaning")
+        logger.warning("DataFrame empty after cleaning")
         return None
 
     return df
 
 
-def _save_cleaned_with_structure(df_cleaned: pd.DataFrame, cleaned_data_path: Path, symbol: str):
+def save_cleaned_data_parquet(df_cleaned: pd.DataFrame, cleaned_data_path: Path, symbol: str):
     """
     Save cleaned data preserving the original directory structure
 

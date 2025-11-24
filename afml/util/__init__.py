@@ -3,7 +3,6 @@ Utility functions. In particular Chapter20 code on Multiprocessing and Vectoriza
 """
 
 from .constants import (
-    CLEAN_DATA_PATH,
     COMMODITIES,
     CRYPTO,
     DATA_PATH,
@@ -23,6 +22,9 @@ from .misc import (
     date_conversion,
     flatten_column_names,
     indices_to_mask,
+    is_first_weekday,
+    is_last_weekday,
+    is_trading_day,
     log_column_changes,
     log_df_info,
     log_performance,

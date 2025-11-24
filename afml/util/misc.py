@@ -12,6 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Literal, Optional, Tuple, Union
 
+import holidays
 import nbformat as nbf
 import numpy as np
 import pandas as pd
@@ -473,6 +474,38 @@ def date_conversion(
         raise ValueError(f"Start date ({start_ts}) must be before end date ({end_ts})")
 
     return start_ts, end_ts
+
+
+def is_trading_day(date, countries=["US"]):
+    date = pd.Timestamp(date)
+    holidays_ = {}
+    for country in countries:
+        holidays_.update(getattr(holidays, country)(years=[date.year]))
+    return date.weekday() < 5 and date not in holidays_
+
+
+def is_first_weekday(date):
+    ts = pd.Timestamp(date)
+    first_day = ts.replace(day=1)
+
+    if first_day.weekday() < 5:
+        first_weekday = first_day
+    else:
+        # Roll forward to Monday
+        first_weekday = first_day + pd.offsets.Day(7 - first_day.weekday())
+
+    return ts == first_weekday
+
+
+def is_last_weekday(date):
+    ts = pd.Timestamp(date)
+    # Month end
+    month_end = ts + pd.offsets.MonthEnd(0)
+    # If month end is weekend, roll back to Friday
+    if month_end.weekday() >= 5:
+        month_end = month_end - pd.offsets.Day(month_end.weekday() - 4)
+
+    return ts == month_end
 
 
 # --- Convert Files ---

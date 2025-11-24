@@ -24,23 +24,24 @@ Features:
 
 import json
 import os
-import tkinter as tk
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import MetaTrader5 as mt5
 import numpy as np
 import pandas as pd
 from dask import dataframe as dd
 from dotenv import load_dotenv
 from loguru import logger
+from tqdm import tqdm
 
-from ..cache import get_data_tracker, time_aware_cacheable
-from ..data_structures.bars import (
-    _make_bar_type_grouper,
-    calculate_ticks_per_period,
-    make_bars,
+from afml.mt5.clean_data import clean_tick_data
+from afml.util.misc import (
+    date_conversion,
+    is_first_weekday,
+    is_last_weekday,
+    log_df_info,
 )
-from ..mt5.clean_data import _save_cleaned_with_structure, clean_tick_data
-from ..util.misc import date_conversion, log_df_info
 
 # --- Credential and Login Management ---
 
@@ -125,6 +126,7 @@ def verify_or_create_account_info(data_path, current_account_name):
         bool: True if the account is verified, False otherwise.
     """
     account_info_file = data_path / "account_info.json"
+    current_account_name = current_account_name.upper()
 
     if account_info_file.exists():
         try:
@@ -187,7 +189,7 @@ def get_ticks(symbol, start_date, end_date, datetime_index=True, verbose=True):
 
     try:
         start_date, end_date = date_conversion(start_date, end_date)
-        mt5.symbol_select(symbol, True)
+        # mt5.symbol_select(symbol, True)
         ticks = mt5.copy_ticks_range(symbol, start_date, end_date, mt5.COPY_TICKS_ALL)
         if ticks is None or len(ticks) == 0:
             logger.warning(
@@ -273,7 +275,58 @@ def get_bars(symbol, timeframe, start_date, end_date, datetime_index=True, verbo
         return pd.DataFrame()
 
 
-def save_data_to_parquet(symbols, start_date, end_date, account_name, path=None, clean=True):
+def process_symbol(symbol, start_dt, end_dt, data_path, account_name):
+    """Worker function to download data for a single symbol."""
+    try:
+        login_mt5(account_name)  # Each worker needs its own login
+    except Exception as e:
+        return {symbol: f"login_failed: {e}"}
+
+    symbol_path = data_path / symbol
+    dates_from = pd.date_range(start=start_dt, end=end_dt, freq="MS", tz="UTC")
+    dates_to = pd.date_range(start=start_dt, end=end_dt, freq="ME", tz="UTC") + pd.Timedelta(days=1)
+
+    missing_data = []
+
+    for start, end in zip(dates_from, dates_to):
+        year_path = symbol_path / str(start.year)
+        year_path.mkdir(parents=True, exist_ok=True)
+
+        file = year_path / f"month-{start.month:02d}.parquet"
+        log_msg_prefix = f"{symbol}  -> Month {start.strftime('%Y-%m')}..."
+
+        if file.exists():
+            df0 = pd.read_parquet(file)
+            if not df0.empty:
+                first, start = [x.date() for x in df0.index[[0, -1]]]
+                if is_first_weekday(first) and is_last_weekday(start):
+                    logger.info(f"{log_msg_prefix} Exists—Skipping download")
+                    continue
+                else:
+                    logger.info(f"{log_msg_prefix} Exists—Appending from {start} to {end}")
+        else:
+            df0 = pd.DataFrame()
+
+        df1 = get_ticks(symbol, start, end, verbose=False)
+        df = pd.concat([df0, df1])
+
+        if not df.empty:
+            df = clean_tick_data(df)
+            df.to_parquet(file, engine="pyarrow", compression="zstd")
+            logger.success(f"{log_msg_prefix} Saved {len(df):,} rows")
+        else:
+            logger.warning(f"{log_msg_prefix} No data found")
+            missing_data.append(start.strftime("%Y-%m"))
+            try:
+                year_path.rmdir()
+            except:
+                pass
+
+    mt5.shutdown()  # Each worker should shutdown its own connection
+    return {symbol: missing_data}
+
+
+def save_data_to_parquet(symbols, start_date, end_date, account_name, path=None):
     """
     Downloads and saves tick data to a partitioned Parquet structure.
 
@@ -283,14 +336,12 @@ def save_data_to_parquet(symbols, start_date, end_date, account_name, path=None,
         end_date (Union[str, dt, pd.Timestamp]): The end date for the data range.
         account_name (str): The name of the account used for the download.
         path (Union[str, Path]): The root folder where data will be saved.
-        clean (bool): Clean data and save to its own directory
+    Returns:
+        None
     """
-    root_path = Path(path) if path is not None else Path().home() / "tick_data_parquet"
-    data_path = root_path / "raw"
-    data_path.mkdir(parents=True, exist_ok=True)
 
-    if not verify_or_create_account_info(data_path, account_name):
-        return
+    data_path = Path(path) if path is not None else Path().home() / "tick_data_parquet"
+    data_path.mkdir(parents=True, exist_ok=True)
 
     date_range = date_conversion(start_date, end_date)
     if not date_range:
@@ -300,60 +351,27 @@ def save_data_to_parquet(symbols, start_date, end_date, account_name, path=None,
     if isinstance(symbols, str):
         symbols = [symbols]
 
-    # --- Main Download Loop ---
     missing_data = {}
-    dates_from = pd.date_range(start=start_dt, end=end_dt, freq="MS", tz="UTC")
-    dates_to = pd.date_range(start=start_dt, end=end_dt, freq="ME", tz="UTC") + pd.Timedelta(days=1)
 
-    for i, symbol in enumerate(symbols):
-        all_dfs = []
-        logger.info(f"\nProcessing symbol: {symbol} [{i+1}/{len(symbols)}]")
-        symbol_path = data_path / symbol
-        for j, (start, end) in enumerate(zip(dates_from, dates_to), 1):
-            year_path = symbol_path / str(start.year)
-            year_path.mkdir(parents=True, exist_ok=True)
+    with ProcessPoolExecutor() as executor:
+        futures = {
+            executor.submit(
+                process_symbol, symbol, start_dt, end_dt, data_path, account_name
+            ): symbol
+            for symbol in symbols
+        }
 
-            file = year_path / f"month-{start.month:02d}.parquet"
-            log_msg_prefix = f"  -> Month {start.strftime('%Y-%m')}..."
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading symbols"):
+            symbol = futures[future]
+            try:
+                result = future.result()
+                missing_data.update(result)
+            except Exception as e:
+                logger.critical(f"Worker for {symbol} failed: {e}")
 
-            # Display symbol info every 10 lines
-            if j % 10 == 0:
-                log_msg_prefix = f"{symbol} {log_msg_prefix}"
-
-            if file.exists():
-                df = pd.read_parquet(file)
-                if not df.empty:
-                    start = df.index[-1].date()
-                    start, end = date_conversion(start, end)
-                    logger.info(f"{log_msg_prefix} Exists, appending from {start} to {end}")
-
-            df = get_ticks(symbol, start, end, verbose=False)
-            if clean:
-                all_dfs.append(df)
-
-            if df.empty:
-                logger.warning(f"{log_msg_prefix} No data found")
-                missing_data.setdefault(symbol, []).append(start.strftime("%Y-%m"))
-                try:
-                    year_path.rmdir()
-                except:
-                    continue
-            else:
-                df.to_parquet(
-                    file,
-                    engine="pyarrow",
-                    compression="zstd",
-                )
-                logger.success(f"{log_msg_prefix} Saved {len(df):,} rows")
-
-        # Clean and save data
-        if clean and not df.empty:
-            cleaned_data_path = root_path / "clean"
-            df_cleaned = clean_tick_data(pd.concat(all_dfs))
-            _save_cleaned_with_structure(df_cleaned, cleaned_data_path, symbol)
-
+    # Summary logging
     logger.info("Download process finished.")
-    if missing_data:
+    if missing_data and any(missing_data.values()):
         logger.warning("Missing data summary:")
         for symbol, months in missing_data.items():
             logger.warning(f"  - {symbol}: {', '.join(months)}")
@@ -391,15 +409,14 @@ def load_tick_data(
         pd.DataFrame: A DataFrame with the requested tick data, or an empty DataFrame
                       if the account verification fails, dates are invalid, or an error occurs.
     """
-    root_path = path or Path().home() / "tick_data_parquet" / "clean"
-    fname = root_path / symbol.upper()
-
+    root_path = path or Path(path)
     if not verify_or_create_account_info(root_path, account_name):
         return pd.DataFrame()
 
     date_range = date_conversion(start_date, end_date)
     if date_range:
         start_dt, end_dt = date_range
+        fname = root_path / symbol.upper()
     else:
         return pd.DataFrame()
 
@@ -452,118 +469,6 @@ def load_tick_data(
         return pd.DataFrame()
 
 
-def load_bars_from_ticks(
-    symbol,
-    start_date,
-    end_date,
-    account_name,
-    bar_type,
-    timeframe,
-    price,
-    bar_size,
-    path=None,
-):
-    """
-    Loads tick data from a partitioned Parquet structure after verifying account.
-
-    Args:
-        symbol (str): The financial instrument symbol to load.
-        start_date (Union[str, dt, pd.Timestamp]): The start date of the desired data range.
-        end_date (Union[str, dt, pd.Timestamp]): The end date of the desired data range.
-        account_name (str): The account name to verify against the data directory.
-        bar_type (str): Bar type ('tick', 'time', 'volume', 'dollar').
-        timeframe (str): Timeframe for calculation.
-        price (str): Price field strategy ('bid', 'ask', 'mid_price', 'bid_ask').
-        bar_size (int): For non-time bars; if 0, dynamic calculation is used.
-        path (Union[str, Path]): The root folder where the data is stored.
-
-    Returns:
-        pd.DataFrame: Constructs OHLC bars from tick data, or an empty DataFrame
-                      if the account verification fails, dates are invalid, or an error occurs.
-    """
-    columns = ["bid", "ask"]
-    if bar_type in ("volume", "dollar"):
-        columns += ["volume"]
-
-    tick_df = load_tick_data(
-        symbol,
-        start_date,
-        end_date,
-        account_name,
-        path,
-        columns=columns,
-        compress=True,
-        verbose=False,
-    )
-
-    if bar_size == 0 and bar_type == "tick":
-        bar_size = calculate_ticks_per_period(tick_df, timeframe, method="mean", verbose=False)
-
-    bar_info = f"{bar_type}-{bar_size:,}" if (bar_type != "time") else f"{timeframe}"
-
-    df = make_bars(
-        tick_df, bar_type, timeframe, price, bar_size, drop_zero_volume=True, verbose=True
-    )
-
-    return df, bar_info
-
-
-def track_data_access(symbol, df, bar_info, purpose):
-    # Track data access
-    ds_name = f"{symbol}_{bar_info}"
-
-    tracker = get_data_tracker()
-    tracker.log_access(
-        dataset_name=ds_name,
-        start_date=df.index[0],
-        end_date=df.index[-1],
-        purpose=purpose,
-        data_shape=df.shape,
-    )
-
-    logger.debug(f"Tracked access: {ds_name} [{df.index[0]} to {df.index[-1]}] for {purpose}")
-
-
-@time_aware_cacheable
-def load_data(
-    symbol,
-    start_date,
-    end_date,
-    account_name,
-    purpose,
-    bar_type="time",
-    timeframe="M1",
-    price="mid_price",
-    bar_size=0,
-    path=None,
-):
-    """
-    Loads tick data from a partitioned Parquet structure after verifying account.
-
-    Args:
-        symbol (str): The financial instrument symbol to load.
-        start_date (Union[str, dt, pd.Timestamp]): The start date of the desired data range.
-        end_date (Union[str, dt, pd.Timestamp]): The end date of the desired data range.
-        account_name (str): The account name to verify against the data directory.
-        purpose (str): Select from 'train', 'test', 'validate', 'optimize', 'analyze'.
-        bar_type (str): Bar type ('tick', 'time', 'volume', 'dollar').
-        timeframe (str): Timeframe for calculation.
-        price (str): Price field strategy ('bid', 'ask', 'mid_price', 'bid_ask').
-        bar_size (int): For non-time bars; if 0, dynamic calculation is used.
-        drop_zero_volume (bool): If True, drops bars with zero tick volume.
-        path (Union[str, Path]): The root folder where the data is stored.
-
-    Returns:
-        pd.DataFrame: Constructs OHLC bars from tick data, or an empty DataFrame
-                      if the account verification fails, dates are invalid, or an error occurs.
-    """
-    df, bar_info = load_bars_from_ticks(
-        symbol, start_date, end_date, account_name, bar_type, timeframe, price, bar_size, path
-    )
-    track_data_access(symbol, df, bar_info, purpose)
-    return df
-
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
     MAJORS = [
@@ -592,7 +497,7 @@ if __name__ == "__main__":
     # --- 1. User Configuration ---
     CONFIG = {
         "save_path": Path.home() / "tick_data_parquet",
-        "symbols_to_download": MAJORS + CRYPTO,
+        "symbols_to_download": CRYPTO,
         "account_to_use": "FundedNext_STLR2_6K",  # This name MUST match the one used in your environment variables
         "start_date": "2022-01-01",
         "end_date": "2024-12-31",
@@ -619,14 +524,12 @@ if __name__ == "__main__":
 
     # --- 4. Run Downloader ---
     if logged_in_account:
-        import MetaTrader5 as mt5
-
         save_data_to_parquet(
-            path=CONFIG["save_path"],
             symbols=CONFIG["symbols_to_download"],
             start_date=CONFIG["start_date"],
             end_date=CONFIG["end_date"],
             account_name=logged_in_account,
+            path=CONFIG["save_path"],
         )
 
         # --- 6. Shutdown MT5 Connection ---
@@ -635,4 +538,3 @@ if __name__ == "__main__":
 
     else:
         logger.critical("Could not log in to MetaTrader 5. Aborting all operations.")
-        logger.info("--- MT5 Connection Closed. Session End ---")

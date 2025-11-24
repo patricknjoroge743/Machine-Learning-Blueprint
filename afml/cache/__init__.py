@@ -7,7 +7,6 @@ import json
 import os
 import threading
 from collections import defaultdict
-from functools import wraps
 from pathlib import Path
 from types import FunctionType
 from typing import Callable, Dict, Optional, Union
@@ -318,6 +317,8 @@ from .cache_monitoring import (
     CacheMonitor,
     FunctionCacheStats,
     analyze_cache_patterns,
+    debug_function_cache,
+    diagnose_cache_issues,
     get_cache_efficiency_report,
     get_cache_monitor,
     print_cache_health,
@@ -516,7 +517,7 @@ def get_cache_size_info() -> Dict[str, Union[int, float]]:
 
             size_info[cache_name] = {
                 "size_bytes": total_size,
-                "size_mb": total_size / (1024 * 1024),
+                "size_mb": round(total_size / (1024 * 1024), 2),
                 "file_count": file_count,
             }
 
@@ -643,6 +644,8 @@ __all__ = [
     "print_cache_health",
     "get_cache_efficiency_report",
     "analyze_cache_patterns",
+    "debug_function_cache",
+    "diagnose_cache_issues",
     # Enhanced convenience functions
     "get_comprehensive_cache_status",
     "optimize_cache_system",

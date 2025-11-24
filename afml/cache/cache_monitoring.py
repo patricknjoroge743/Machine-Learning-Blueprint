@@ -431,6 +431,15 @@ class CacheMonitor:
     def _get_function_cache_size(self, function_name: str) -> Optional[float]:
         """Get disk size of cache for a function in MB."""
         try:
+            # Check if memory system is available
+            if (
+                not hasattr(self, "memory")
+                or not self.memory
+                or not hasattr(self.memory, "location")
+            ):
+                logger.debug("Memory system not available for cache size detection")
+                return 0.0
+
             cache_dir = Path(self.memory.location)
             logger.debug(f"Looking for cache in: {cache_dir}")
 
@@ -441,32 +450,47 @@ class CacheMonitor:
             total_size = 0
             found_files = 0
 
-            # Joblib stores cache files with hashed names
-            # Look in all subdirectories for function-related cache files
+            # Convert function name to search patterns
+            search_patterns = [
+                function_name.replace(".", "_"),  # afml.module.func -> afml_module_func
+                function_name.split(".")[-1],  # Just function name
+            ]
+
+            logger.debug(f"Searching for patterns: {search_patterns}")
+
+            # Search through all cache files
             for cache_file in cache_dir.rglob("*"):
                 if cache_file.is_file():
-                    # Check if this file might belong to our function by checking parent directories
-                    # or looking for patterns that match the function
-                    try:
-                        # Joblib often stores function info in the directory structure
-                        if function_name.replace(".", "_") in str(cache_file):
+                    file_path_str = str(cache_file).lower()
+                    file_name = cache_file.name.lower()
+
+                    # Check if file matches any of our patterns
+                    matches = any(
+                        pattern.lower() in file_path_str or pattern.lower() in file_name
+                        for pattern in search_patterns
+                    )
+
+                    if matches:
+                        try:
                             file_size = cache_file.stat().st_size
                             total_size += file_size
                             found_files += 1
-                            logger.debug(f"Found cache file: {cache_file} - {file_size} bytes")
-                    except Exception as e:
-                        logger.debug(f"Error checking file {cache_file}: {e}")
-                        continue
+                            logger.debug(
+                                f"Found matching cache file: {cache_file.name} - {file_size} bytes"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Error accessing {cache_file}: {e}")
+                            continue
 
             if found_files > 0:
                 size_mb = total_size / (1024 * 1024)
-                logger.debug(
-                    f"Total cache size for {function_name}: {size_mb:.2f} MB ({found_files} files)"
+                logger.info(
+                    f"Cache size for {function_name}: {size_mb:.2f} MB ({found_files} files)"
                 )
                 return size_mb
             else:
                 logger.debug(f"No cache files found for {function_name}")
-                return 0.0
+                return 0.0  # Return 0 instead of None for no cache
 
         except Exception as e:
             logger.warning(f"Error calculating cache size for {function_name}: {e}")
@@ -561,6 +585,117 @@ def analyze_cache_patterns() -> Dict[str, Any]:
     return monitor.analyze_cache_patterns()
 
 
+def diagnose_cache_issues():
+    """Run comprehensive cache diagnostics."""
+    from . import get_cache_size_info, get_cache_stats
+    from .cache_monitoring import get_cache_efficiency_report, get_cache_monitor
+
+    print("\n" + "=" * 80)
+    print("CACHE DIAGNOSTICS REPORT")
+    print("=" * 80)
+
+    # 1. Basic cache stats
+    stats = get_cache_stats()
+    print(f"\n1. BASIC STATS:")
+    print(f"   Tracked functions: {len(stats)}")
+
+    total_calls = sum(s["hits"] + s["misses"] for s in stats.values())
+    total_hits = sum(s["hits"] for s in stats.values())
+    overall_hit_rate = total_hits / total_calls if total_calls > 0 else 0
+    print(f"   Total calls: {total_calls}")
+    print(f"   Overall hit rate: {overall_hit_rate:.1%}")
+
+    # 2. Cache efficiency report
+    print(f"\n2. CACHE EFFICIENCY:")
+    df = get_cache_efficiency_report()
+    if not df.empty:
+        print(f"   Functions with issues:")
+
+        zero_hit = df[df["hit_rate"] == "0.0%"]
+        if len(zero_hit) > 0:
+            print(f"   - {len(zero_hit)} functions with 0% hit rate")
+            for func in zero_hit["function"].head(3):
+                print(f"     * {func}")
+
+        low_hit = df[df["hit_rate"].str.rstrip("%").astype(float) < 50]
+        if len(low_hit) > 0:
+            print(f"   - {len(low_hit)} functions with <50% hit rate")
+
+    # 3. Cache sizes
+    print(f"\n3. CACHE SIZES:")
+    size_info = get_cache_size_info()
+    for cache_type, info in size_info.items():
+        print(f"   {cache_type}: {info['size_mb']:.2f} MB ({info['file_count']} files)")
+
+    # 4. Monitor status
+    print(f"\n4. MONITOR STATUS:")
+    monitor = get_cache_monitor()
+    all_stats = monitor.get_all_function_stats()
+    print(f"   Monitor tracking: {len(all_stats)} functions")
+
+    functions_with_size = [s for s in all_stats if s.cache_size_mb and s.cache_size_mb > 0]
+    print(f"   Functions with cache files: {len(functions_with_size)}")
+
+    functions_with_timing = [s for s in all_stats if s.avg_computation_time]
+    print(f"   Functions with timing data: {len(functions_with_timing)}")
+
+    print("\n" + "=" * 80)
+
+
+def debug_function_cache(func_name: str):
+    """Debug cache for a specific function."""
+    from . import cache_stats, memory
+    from .cache_monitoring import get_cache_monitor
+
+    print(f"\n=== DEBUGGING CACHE FOR: {func_name} ===")
+
+    monitor = get_cache_monitor()
+
+    # Check basic stats
+    stats = cache_stats.get_stats().get(func_name, {})
+    print(f"Stats: {stats}")
+
+    # Check detailed stats
+    func_stats = monitor.get_function_stats(func_name)
+    if func_stats:
+        print(f"Detailed stats:")
+        print(f"  - Calls: {func_stats.total_calls}")
+        print(f"  - Hit rate: {func_stats.hit_rate:.1%}")
+        print(f"  - Cache size: {func_stats.cache_size_mb or 0:.2f} MB")
+        print(f"  - Avg time: {func_stats.avg_computation_time or 'N/A'} ms")
+    else:
+        print("No detailed stats available")
+
+    # Check cache directory
+    cache_dir = memory.location
+    print(f"Cache directory: {cache_dir}")
+
+    # Look for function-specific cache files
+    import os
+
+    if os.path.exists(cache_dir):
+        # Convert function name to search patterns
+        patterns = [
+            func_name.replace(".", "_"),
+            func_name.split(".")[-1],
+        ]
+
+        found_files = []
+        for root, dirs, files in os.walk(cache_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                for pattern in patterns:
+                    if pattern.lower() in file_path.lower():
+                        found_files.append(file_path)
+                        break
+
+        print(f"Found {len(found_files)} related cache files")
+        for f in found_files[:5]:  # Show first 5
+            size = os.path.getsize(f) / 1024  # KB
+            print(f"  - {os.path.basename(f)} ({size:.1f} KB)")
+            print(f"  - {os.path.basename(f)} ({size:.1f} KB)")
+
+
 __all__ = [
     "CacheMonitor",
     "FunctionCacheStats",
@@ -569,4 +704,6 @@ __all__ = [
     "print_cache_health",
     "get_cache_efficiency_report",
     "analyze_cache_patterns",
+    "diagnose_cache_issues",
+    "debug_function_cache",
 ]

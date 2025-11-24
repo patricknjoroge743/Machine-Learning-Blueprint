@@ -295,17 +295,26 @@ def create_robust_cacheable(
     from functools import wraps
 
     from . import cache_stats, memory
-    from .cache_monitoring import get_cache_monitor  # Add this import
+    from .cache_monitoring import get_cache_monitor
 
     def decorator(func):
         func_name = f"{func.__module__}.{func.__qualname__}"
         cached_func = memory.cache(func)
         seen_signatures = set()
-        monitor = get_cache_monitor()  # Get monitor instance
+        monitor = get_cache_monitor()
 
         @wraps(func)
         def wrapper(*args, **kwargs):
+            nonlocal seen_signatures
+
+            # Track access time (ALWAYS do this first)
+            monitor.track_access(func_name)
+
             # Generate cache key
+            cache_key = None
+            is_hit = False
+            computation_start = None
+
             try:
                 if use_time_awareness:
                     cache_key = TimeSeriesCacheKey.generate_key_with_time_range(func, args, kwargs)
@@ -316,16 +325,20 @@ def create_robust_cacheable(
                 if cache_key in seen_signatures:
                     cache_stats.record_hit(func_name)
                     is_hit = True
+                    logger.debug(f"Cache HIT for {func_name}")
                 else:
                     cache_stats.record_miss(func_name)
                     seen_signatures.add(cache_key)
                     is_hit = False
+                    computation_start = time.time()  # Start timing for misses
+                    logger.debug(f"Cache MISS for {func_name}")
 
             except Exception as e:
                 logger.warning(f"Cache key generation failed for {func_name}: {e}")
                 cache_stats.record_miss(func_name)
                 cache_key = None
                 is_hit = False
+                computation_start = time.time()  # Start timing for error case
 
             # Track data access if requested
             if track_data_access:
@@ -336,61 +349,85 @@ def create_robust_cacheable(
                 except Exception as e:
                     logger.warning(f"Data tracking failed for {func_name}: {e}")
 
-            # Track access time (ALWAYS track this)
-            monitor.track_access(func_name)
-
-            # Execute function with timing for misses
-            start_time = time.time()
+            # Execute function
             try:
-                result = cached_func(*args, **kwargs)
-
-                # Track computation time for misses
-                if not is_hit:
-                    computation_time = time.time() - start_time
-                    monitor.track_computation_time(func_name, computation_time)
+                if is_hit:
+                    # For cache hits, just return cached result (no timing needed)
+                    result = cached_func(*args, **kwargs)
+                else:
+                    # For cache misses, time the computation
+                    result = cached_func(*args, **kwargs)
+                    if computation_start:
+                        computation_time = time.time() - computation_start
+                        monitor.track_computation_time(func_name, computation_time)
+                        logger.debug(f"Computation time for {func_name}: {computation_time:.3f}s")
 
                 return result
 
             except (EOFError, pickle.PickleError, OSError) as e:
-                # Handle cache corruption...
-                # Also track computation time for cache misses that require recomputation
-                computation_time = time.time() - start_time
-                if not is_hit:  # Only track if it was originally a miss
-                    monitor.track_computation_time(func_name, computation_time)
-
+                # Handle cache corruption
                 logger.warning(
                     f"Cache corruption for {func_name}: {type(e).__name__} - recomputing"
                 )
 
-                # Clear the corrupted cache entry if we have a cache key
+                # Clear corrupted cache if possible
                 if cache_key is not None:
-                    try:
-                        # Try to get the actual cache key used by joblib
-                        joblib_cache_key = cached_func._get_cache_id(*args, **kwargs)
-                        cache_dir = Path(cached_func.store_backend.location)
+                    _clear_corrupted_cache(cached_func, args, kwargs, func_name)
 
-                        # Remove files matching this cache key
-                        for cache_file in cache_dir.rglob("*"):
-                            if cache_file.is_file() and str(joblib_cache_key) in str(cache_file):
-                                cache_file.unlink()
-                                logger.debug(f"Removed corrupted file: {cache_file.name}")
+                # Execute function directly and track time
+                direct_start = time.time()
+                result = func(*args, **kwargs)
 
-                    except Exception as clear_exc:
-                        logger.warning(
-                            f"Failed to clear corrupted cache for {func_name}: {clear_exc}"
-                        )
+                if computation_start:  # Track time if it was originally a miss
+                    computation_time = time.time() - direct_start
+                    monitor.track_computation_time(func_name, computation_time)
+                    logger.debug(
+                        f"Direct computation time for {func_name}: {computation_time:.3f}s"
+                    )
 
-                # Execute function directly
-                return func(*args, **kwargs)
+                return result
+
             except Exception as e:
                 # Other unexpected errors
                 logger.error(f"Unexpected cache error for {func_name}: {e}")
-                return func(*args, **kwargs)
+                raise
 
+        # Add cache info method for debugging
+        def cache_info():
+            return {
+                "function_name": func_name,
+                "seen_signatures": len(seen_signatures),
+                "hits": cache_stats._stats.get(func_name, {}).get("hits", 0),
+                "misses": cache_stats._stats.get(func_name, {}).get("misses", 0),
+            }
+
+        wrapper.cache_info = cache_info
         wrapper._afml_cacheable = True
         return wrapper
 
     return decorator
+
+
+def _clear_corrupted_cache(cached_func, args, kwargs, func_name):
+    """Helper to clear corrupted cache entries."""
+    try:
+        if hasattr(cached_func, "_get_cache_id"):
+            joblib_cache_key = cached_func._get_cache_id(*args, **kwargs)
+            cache_dir = Path(cached_func.store_backend.location)
+
+            # Remove files matching this cache key
+            removed_count = 0
+            for cache_file in cache_dir.rglob("*"):
+                if cache_file.is_file() and str(joblib_cache_key) in str(cache_file):
+                    cache_file.unlink()
+                    removed_count += 1
+                    logger.debug(f"Removed corrupted file: {cache_file.name}")
+
+            if removed_count > 0:
+                logger.info(f"Cleared {removed_count} corrupted cache files for {func_name}")
+
+    except Exception as clear_exc:
+        logger.warning(f"Failed to clear corrupted cache for {func_name}: {clear_exc}")
 
 
 def _track_dataframe_access(tracker, args, kwargs, dataset_name, purpose):
