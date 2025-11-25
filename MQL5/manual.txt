@@ -1,0 +1,30 @@
+// In your trading EA
+#include <TradingCache/OrderCache.mqh>
+#include <TradingCache/SystemStateCache.mqh>
+
+COrderCache orderCache;
+CSystemStateCache systemCache;
+
+void OnTick()
+{
+   // Log trading decisions
+   if(ShouldEnterTrade())
+   {
+      systemCache.LogDecision(DECISION_ENTRY_TAKEN, _Symbol, "Strategy signal triggered");
+      // Your entry logic
+   }
+   
+   // Update caches periodically
+   if(TimeCurrent() % 300 == 0) // Every 5 minutes
+   {
+      orderCache.UpdateFromTerminal();
+      orderCache.SaveToFile();
+      systemCache.SaveToFile();
+   }
+}
+
+
+
+
+
+

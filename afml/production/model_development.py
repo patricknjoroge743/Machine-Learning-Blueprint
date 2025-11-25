@@ -1,53 +1,143 @@
-from typing import Dict, List, Tuple
+import shutil
+from pathlib import Path
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+from bleach import clean
+from matplotlib.pyplot import tick_params
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
 
-from afml.cross_validation.hyperfit import MyPipeline, clf_hyper_fit
-from afml.data_structures.bars import make_bars
-from afml.filters.filters import cusum_filter
-from afml.labeling.triple_barrier import add_vertical_barrier, get_events, triple_barrier_labels
-from afml.sample_weights.optimized_attribution import get_weights_by_time_decay_optimized
-from afml.util.misc import value_counts_data
-from afml.util.volatility import get_daily_vol, get_parkinson_vol
-
-from ..cache import (
-    data_tracking_cacheable,
-    get_cache_monitor,
+from afml.cache import (
     print_contamination_report,
     robust_cacheable,
     time_aware_cacheable,
 )
-from ..mt5.clean_data import clean_tick_data
-from ..mt5.load_data import load_tick_data
+from afml.cache.cache_monitoring import get_cache_monitor
+from afml.cache.data_access_tracker import get_data_tracker
+from afml.data_structures.bars import calculate_ticks_per_period, make_bars
+from afml.filters.filters import cusum_filter
+from afml.labeling.triple_barrier import add_vertical_barrier, triple_barrier_labels
+from afml.sample_weights.optimized_attribution import (
+    get_weights_by_time_decay_optimized,
+)
+from afml.util.constants import DATA_PATH, TIMEFRAMES
+from afml.util.misc import value_counts_data
+from afml.util.volatility import get_daily_vol
 
 
-@data_tracking_cacheable(dataset_name="production_training_2024", purpose="train")
+@time_aware_cacheable
+def make_training_bars(
+    tick_df: pd.DataFrame,
+    bar_type: str = "tick",
+    bar_size: Union[int, str] = 100,
+    price: str = "mid_price",
+    verbose: bool = False,
+) -> pd.DataFrame:
+    bars_df = make_bars(
+        tick_df=tick_df,
+        bar_type=bar_type,
+        bar_size=bar_size,
+        price=price,
+        verbose=verbose,
+    )
+    return bars_df
+
+
 def load_and_prepare_training_data(
-    symbol: str,
+    symbols: Union[list, str],
     start_date: str,
     end_date: str,
     account_name: str,
-    bar_type: str,
-    timeframe: str,
-    price: str,
-    bar_size: int,
+    bar_types=["tick", "time"],
+    bar_sizes: Union[list, str] = TIMEFRAMES,
+    price: str = "mid_price",
     path: str = None,
-    clean: bool = False,
-) -> pd.DataFrame:
+    clean_up: bool = False,
+) -> Dict[str, Dict[str, pd.DataFrame]]:
     """
     Load and prepare training data with contamination tracking.
 
     This function is tracked to ensure we don't accidentally
     use test data during training iterations.
+
+    Args:
+        symbols (Union[str, list, tuple]): A single symbol or a collection of symbols to download.
+        start_date (Union[str, dt, pd.Timestamp]): The start date for the data range.
+        end_date (Union[str, dt, pd.Timestamp]): The end date for the data range.
+        account_name (str): The name of the account used for the download.
+        bar_types (Union[str, list, tuple]): Types of bars to generate (e.g., 'tick', 'time').
+        bar_sizes (Union[str, int, list, tuple]): Sizes for the bars (e.g., 'M1', 100).
+        price (str): Price field strategy ('bid', 'ask', 'mid_price', 'bid_ask').
+        path (Union[str, Path]): The root folder where data will be saved.
+        clean_up (bool): Whether to delete local tick data after processing.
+    Returns:
+        Dict[str, Dict[str, pd.DataFrame]]: Nested dictionary with symbols as keys,
+        each containing another dictionary with bar types as keys and their corresponding DataFrames.
     """
-    data = load_tick_data(symbol, start_date, end_date, account_name, path, columns=["bid", "ask"])
-    if clean:
-        data = clean_tick_data(data)
-    bars = make_bars(data, bar_type, timeframe, price, bar_size, verbose=True)
+    from afml.mt5.load_data import load_tick_data, save_data_to_parquet
+
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    if isinstance(bar_types, str):
+        bar_types = [bar_types]
+    if isinstance(bar_sizes, str):
+        bar_sizes = [bar_sizes]
+
+    data = {symbol: {bt: {} for bt in bar_types} for symbol in symbols}
+    tick_params = dict(
+        start_date=start_date,
+        end_date=end_date,
+        account_name=account_name,
+        columns=["bid", "ask"],
+        path=path,
+        verbose=False,
+    )
+    for symbol in symbols:
+        tick_params["symbol"] = symbol
+        try:
+            tick_df = load_tick_data(**tick_params)
+        except:
+            save_data_to_parquet(symbol, start_date, end_date, account_name, path)
+            tick_df = load_tick_data(**tick_params)
+        for bar_type in bar_types:
+            print(f"\nGenerating {bar_type} bars for {symbol.upper()}...")
+            for bar_size in bar_sizes:
+                if bar_type == "tick" and isinstance(bar_size, str):
+                    bar_size = calculate_ticks_per_period(tick_df, bar_size)
+                df = make_training_bars(
+                    tick_df=tick_df,
+                    bar_type=bar_type,
+                    bar_size=bar_size,
+                    price=price,
+                    verbose=False,
+                )
+                tracker = get_data_tracker()
+                tracker.log_access(
+                    dataset_name=f"{symbol}_{bar_type}_{bar_size}".lower(),
+                    start_date=df.index[0],
+                    end_date=df.index[-1],
+                    purpose="train",
+                    data_shape=df.shape,
+                )
+                tracker.save_log()
+                print(f" - Bar Size: {bar_size} ({df.shape[0]:,} rows) ")
+                data[symbol][bar_type][bar_size] = df
+        if clean_up:
+            # Clean up local tick data to save space
+            dirpath = (
+                Path(path) / symbol.upper() if path is not None else DATA_PATH / symbol.upper()
+            )
+            try:
+                if dirpath.exists():
+                    shutil.rmtree(dirpath)
+                    print("Folder deleted successfully.")
+                else:
+                    print("Folder does not exist.")
+            except Exception as e:
+                print(f"Error: {e}")
+
     return data
 
 
@@ -61,6 +151,8 @@ def create_feature_engineering_pipeline(data: pd.DataFrame, config: Dict) -> pd.
     - Cached: ~0.8 seconds (150x speedup)
     - Hit rate: 98.2%
     """
+    import pandas_ta as ta
+
     features = pd.DataFrame(index=data.index)
 
     # Volatility features (expensive - 45s first time)
@@ -96,7 +188,7 @@ def generate_labels_triple_barrier(
     max_holding_period: int = 100,
     min_ret: float = 0.0,
     side_prediction: pd.Series = None,
-    vertical_barrier_zero: bool = True
+    vertical_barrier_zero: bool = True,
 ) -> pd.Series:
     """
     Generate labels using triple-barrier method.
@@ -111,9 +203,9 @@ def generate_labels_triple_barrier(
     # Set up for labeling
     if isinstance(max_holding_period, int):
         max_holding_period = dict(num_bars=max_holding_period)
-    target = get_daily_vol(close, lookback) # volatility target
-    t_events = cusum_filter(close, target.mean()) # filtered trade events
-    
+    target = get_daily_vol(close, lookback)  # volatility target
+    t_events = cusum_filter(close, target.mean())  # filtered trade events
+
     # Compute barriers
     vertical_barrier_times = add_vertical_barrier(t_events, close, **max_holding_period)
     labels = triple_barrier_labels(
@@ -128,19 +220,19 @@ def generate_labels_triple_barrier(
         vertical_barrier_zero=vertical_barrier_zero,
         drop=True,
         verbose=False,
-        )
+    )
 
     return labels
 
 
 @robust_cacheable
 def compute_sample_weights_time_decay(
-    labels: pd.DataFrame, 
-    close_index: pd.DatetimeIndex, 
+    labels: pd.DataFrame,
+    close_index: pd.DatetimeIndex,
     attribution: str = None,
-    decay_factor: float = 0.95, 
+    decay_factor: float = 0.95,
     linear: bool = True,
-    ) -> pd.Series:
+) -> pd.Series:
     """
     Compute sample weights with time decay.
     More recent samples get higher weights.
@@ -150,13 +242,13 @@ def compute_sample_weights_time_decay(
     - Cached: ~0.1 seconds (50x speedup)
     """
     weights = get_weights_by_time_decay_optimized(
-    labels,
-    close_index,
-    last_weight=decay_factor,
-    linear=linear,
-    av_uniqueness=labels["tW"],
-    verbose=False,
-)
+        labels,
+        close_index,
+        last_weight=decay_factor,
+        linear=linear,
+        av_uniqueness=labels["tW"],
+        verbose=False,
+    )
     if attribution != "return":
         return weights
     else:
@@ -183,7 +275,7 @@ def train_model_with_cv(
 
     # Time-series CV to prevent lookahead bias
     cv = PurgedKFold(n_splits=cv_splits, samples_info_sets=labels["t1"])
-    
+
     # Set scoring method
     if set(labels["bin"].values) == {0, 1}:
         scoring = "f1"  # f1 for meta-labeling
@@ -256,7 +348,7 @@ def develop_production_model(
     # Step 3: Label generation (cached - 95.7% hit rate)
     print("\n[Step 3/6] Generating labels...")
     labels = generate_labels_triple_barrier(bars, **label_config)
-    print(f"✓ Generated labels: \n{value_counts_data(labels["bin"])}")
+    print(f"✓ Generated labels: \n{value_counts_data(labels['bin'])}")
 
     # Step 4: Sample weights (cached)
     print("\n[Step 4/6] Computing sample weights...")

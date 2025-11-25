@@ -7,7 +7,6 @@ from typing import Any, Dict, List
 import numpy as np
 import onnx
 import onnxruntime
-import pandas as pd
 import sklearn
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType

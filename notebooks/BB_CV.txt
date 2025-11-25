@@ -1,0 +1,44 @@
+-------------------------------------------------------------
+bb_std, bb_period = 2, 20  # Bollinger Band parameters
+-------------------------------------------------------------
+
+
+RandomForestClassifier Weighting Schemes
+unweighted max_samples model achieved the best f1 score of 0.796668.
+uniqueness max_samples model achieved the best f1 score of 0.803859.
+return combined model achieved the best f1 score of 0.000000.
+
+                           unweighted         uniqueness             return
+standard            0.796668 ± 0.0017  0.803859 ± 0.0016  0.000000 ± 0.0000
+balanced_subsample  0.626265 ± 0.0112  0.718828 ± 0.0183  0.000000 ± 0.0000
+max_samples         0.796668 ± 0.0017  0.803859 ± 0.0016  0.000000 ± 0.0000
+combined            0.631275 ± 0.0078  0.727445 ± 0.0190  0.000000 ± 0.0000
+
+Selected Best Classifier (max_samples): RandomForestClassifier(criterion='entropy', max_samples=0.6480433313965148,
+                       min_weight_fraction_leaf=0.05, n_estimators=500,
+                       n_jobs=-1, random_state=42)
+
+                   unweighted       uniqueness           return
+accuracy       0.6621 ± 0.002   0.6720 ± 0.002   0.6669 ± 0.007
+pwa            0.6626 ± 0.003   0.6727 ± 0.003   0.6728 ± 0.007
+neg_log_loss  -0.6399 ± 0.002  -0.6330 ± 0.002  -0.6348 ± 0.004
+precision      0.6621 ± 0.002   0.6720 ± 0.002   0.0000 ± 0.000
+recall         1.0000 ± 0.000   1.0000 ± 0.000   0.0000 ± 0.000
+f1             0.7967 ± 0.002   0.8039 ± 0.002   0.0000 ± 0.000
+
+uniqueness model achieved the best f1 score of 0.803859.
+
+{'unweighted': [{'fold': 1, 'TN': 0.0, 'FP': 1595.0, 'FN': 0.0, 'TP': 3127.0},
+                {'fold': 2, 'TN': 0.0, 'FP': 1583.0, 'FN': 0.0, 'TP': 3139.0},
+                {'fold': 3, 'TN': 0.0, 'FP': 1609.0, 'FN': 0.0, 'TP': 3112.0}],
+ 'uniqueness': [{'fold': 1, 'TN': 0.0, 'FP': 1011.33, 'FN': 0.0, 'TP': 2093.9},
+                {'fold': 2, 'TN': 0.0, 'FP': 958.24, 'FN': 0.0, 'TP': 1971.6},
+                {'fold': 3, 'TN': 0.0, 'FP': 1041.16, 'FN': 0.0, 'TP': 2103.3}],
+ 'return': [{'fold': 1, 'TN': 3485.92, 'FP': 0.0, 'FN': 1683.17, 'TP': 0.0},
+            {'fold': 2, 'TN': 2939.54, 'FP': 0.0, 'FN': 1455.05, 'TP': 0.0},
+            {'fold': 3, 'TN': 3025.08, 'FP': 0.0, 'FN': 1576.24, 'TP': 0.0}]}
+
+
+-------------------------------------------------------------
+bb_std, bb_period = 2, 1.5  # Bollinger Band parameters
+-------------------------------------------------------------

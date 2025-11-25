@@ -156,16 +156,6 @@ def compute_mt5_features(df: pd.DataFrame, params: dict):
     return features
 
 
-def compute_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """Compute RSI indicator."""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
 # =============================================================================
 # STEP 4: Label Generation with Robust Caching
 # =============================================================================

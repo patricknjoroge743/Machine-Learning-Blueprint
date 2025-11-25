@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Project>
+  <Name>BetSizingSystem</Name>
+  <Version>1.00</Version>
+  <Description>Advanced bet sizing system based on AFML Chapter 10</Description>
+  
+  <Files>
+    <Include>
+      <File>Include/BetSizing/BetSizing.mqh</File>
+      <File>Include/BetSizing/BetEvents.mqh</File>
+      <File>Include/BetSizing/BetSizingImpl.mqh</File>
+      <File>Include/Utilities/ArrayUtils.mqh</File>
+      <File>Include/Utilities/MathUtils.mqh</File>
+    </Include>
+    
+    <Expert>
+      <File>Experts/BetSizingEA.mq5</File>
+      <File>Experts/BetSizingTester.mq5</File>
+    </Expert>
+    
+    <Script>
+      <File>Scripts/TestBetSizing.mq5</File>
+    </Script>
+  </Files>
+  
+  <Properties>
+    <BaseCurrency>USD</BaseCurrency>
+    <Optimization>true</Optimization>
+    <Testing>true</Testing>
+    <Debug>true</Debug>
+  </Properties>
+</Project>

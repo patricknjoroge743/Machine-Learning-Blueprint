@@ -486,9 +486,9 @@ time_aware_data_tracking_cacheable = lambda dataset_name, purpose: create_robust
 __all__ = [
     "CacheKeyGenerator",
     "TimeSeriesCacheKey",
+    "cacheable",
+    "data_tracking_cacheable",  # NEW
     "robust_cacheable",  # Backward compatible
     "time_aware_cacheable",  # Backward compatible
-    "data_tracking_cacheable",  # NEW
     "time_aware_data_tracking_cacheable",  # NEW
-    "cacheable",  # For new code
 ]

@@ -1,0 +1,27 @@
+======================================================================
+CACHE HEALTH REPORT
+======================================================================
+
+Overall Statistics:
+  Total Functions:     4
+  Total Calls:         458
+  Overall Hit Rate:    37.8%
+  Total Cache Size:    0.00 MB
+
+Top Performers (by hit rate):
+  1. create_bollinger_features: 61.5% (13 calls)
+  2. trend_scanning_labels: 41.6% (269 calls)
+  3. get_event_weights: 32.2% (87 calls)
+  4. triple_barrier_labels: 28.1% (89 calls)
+
+Worst Performers (by hit rate):
+  1. create_bollinger_features: 61.5% (13 calls)
+  2. trend_scanning_labels: 41.6% (269 calls)
+  3. get_event_weights: 32.2% (87 calls)
+  4. triple_barrier_labels: 28.1% (89 calls)
+
+Recommendations:
+  1. Overall hit rate is low (<50%). Consider reviewing cache key generation or function parameter patterns.
+  2. Functions with low hit rate: triple_barrier_labels. Review cache key generation for these functions.
+
+======================================================================

@@ -389,7 +389,6 @@ def load_tick_data(
     account_name,
     path=None,
     columns=None,
-    compress=True,
     verbose=True,
 ):
     """
@@ -402,14 +401,17 @@ def load_tick_data(
         end_date (Union[str, dt, pd.Timestamp]): The end date of the desired data range.
         account_name (str): The account name to verify against the data directory.
         columns (Optional[list]): A list of specific columns to load. Loads all if None.
-        compress (bool): If True, save memory by optimizing dtypes.
         verbose (bool): If True, logs detailed DataFrame info upon successful load.
 
     Returns:
         pd.DataFrame: A DataFrame with the requested tick data, or an empty DataFrame
                       if the account verification fails, dates are invalid, or an error occurs.
     """
-    root_path = path or Path(path)
+    try:
+        root_path = Path(path)
+    except TypeError:
+        root_path = Path.home() / "tick_data_parquet"
+
     if not verify_or_create_account_info(root_path, account_name):
         return pd.DataFrame()
 
@@ -437,7 +439,7 @@ def load_tick_data(
             if any(np.isnan(df[col].unique())):
                 to_drop.append(col)
             # Optimise dtype of flags column for memory
-            if col == "flags" and compress:
+            if col == "flags":
                 mem = df.memory_usage(deep=True).sum()  # memory before downcasting
                 dtype_orig = df["flags"].dtype
                 limit = df["flags"].max()
@@ -467,6 +469,145 @@ def load_tick_data(
     except Exception as e:
         logger.error(f"Failed to load data for {symbol}. Error: {e}")
         return pd.DataFrame()
+
+
+def get_tick_data_in_memory(
+    symbols, start_date, end_date, account_name, clean_data=True, verbose=True
+):
+    """
+    Fetches tick data and returns concatenated DataFrame without saving to disk.
+    Perfect for feeding into bar creation pipelines.
+
+    Args:
+        symbols (Union[str, list]): Symbol or list of symbols to fetch
+        start_date (Union[str, datetime]): Start date for data range
+        end_date (Union[str, datetime]): End date for data range
+        account_name (str): MT5 account name for login
+        clean_data (bool): Whether to apply cleaning to tick data
+        verbose (bool): Whether to log progress details
+
+    Returns:
+        pd.DataFrame: Concatenated tick data for all symbols
+    """
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    all_tick_data = []
+
+    for symbol in tqdm(symbols, desc="Fetching symbols in memory"):
+        try:
+            # Login for each symbol (handles connection pooling)
+            logged_in = login_mt5(account_name, verbose=False)
+            if not logged_in:
+                logger.error(f"Failed to login for {symbol}")
+                continue
+
+            # Get raw tick data
+            tick_df = get_ticks(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                datetime_index=True,
+                verbose=False,
+            )
+
+            if tick_df.empty:
+                logger.warning(f"No data retrieved for {symbol}")
+                continue
+
+            # Apply cleaning if requested
+            if clean_data:
+                tick_df = clean_tick_data(tick_df)
+                if tick_df is None or tick_df.empty:
+                    logger.warning(f"Data cleaning removed all data for {symbol}")
+                    continue
+
+            tick_df["symbol"] = symbol  # Add symbol identifier
+            all_tick_data.append(tick_df)
+
+            if verbose:
+                logger.success(f"Fetched {len(tick_df):,} ticks for {symbol}")
+
+        except Exception as e:
+            logger.error(f"Error processing {symbol}: {e}")
+            continue
+        finally:
+            mt5.shutdown()  # Cleanup connection
+
+    if not all_tick_data:
+        logger.error("No data was successfully fetched for any symbol")
+        return pd.DataFrame()
+
+    # Concatenate all symbol data
+    combined_df = pd.concat(all_tick_data, axis=0)
+    combined_df.sort_index(inplace=True)
+
+    logger.success(f"Combined {len(combined_df):,} ticks across {len(all_tick_data)} symbols")
+
+    if verbose:
+        log_df_info(combined_df)
+
+    return combined_df
+
+
+# Complete data pipeline
+def create_multi_timeframe_bars(symbols, start_date, end_date, account_name, bar_configs=None):
+    """
+    End-to-end pipeline: Fetch ticks → Create multiple bar types
+    """
+    if bar_configs is None:
+        bar_configs = [
+            {"bar_type": "time", "bar_size": "H1", "price": "mid_price"},
+            {"bar_type": "tick", "bar_size": 1000, "price": "bid_ask"},
+            {"bar_type": "volume", "bar_size": 1000000, "price": "mid_price"},
+        ]
+
+    # 1. Fetch all tick data in memory
+    tick_data = get_tick_data_in_memory(
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+        account_name=account_name,
+        clean_data=True,
+        verbose=True,
+    )
+
+    if tick_data.empty:
+        logger.error("No tick data available for bar creation")
+        return {}
+
+    # 2. Create different bar types
+    bars_dict = {}
+    for config in bar_configs:
+        bar_type = config["bar_type"]
+        bar_size = config["bar_size"]
+
+        logger.info(f"Creating {bar_type} bars with size {bar_size}")
+
+        # Group by symbol and create bars for each
+        symbol_bars = []
+        for symbol in symbols:
+            symbol_ticks = tick_data[tick_data["symbol"] == symbol]
+            if symbol_ticks.empty:
+                continue
+
+            try:
+                bars_df = make_bars(
+                    tick_df=symbol_ticks,
+                    bar_type=bar_type,
+                    bar_size=bar_size,
+                    price=config["price"],
+                    verbose=True,
+                )
+                bars_df["symbol"] = symbol
+                symbol_bars.append(bars_df)
+            except Exception as e:
+                logger.error(f"Failed creating {bar_type} bars for {symbol}: {e}")
+
+        if symbol_bars:
+            bars_dict[f"{bar_type}_{bar_size}"] = pd.concat(symbol_bars, axis=0)
+
+    return bars_dict
 
 
 # --- Main Execution Block ---
