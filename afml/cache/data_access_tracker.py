@@ -298,10 +298,17 @@ def save_access_log():
     tracker.save_log()
 
 
+def clear_data_access_log():
+    """Convenience function to clear access log."""
+    tracker = get_data_tracker()
+    tracker.clear_log()
+
+
 __all__ = [
     "DataAccessTracker",
     "get_data_tracker",
     "log_data_access",
     "print_contamination_report",
     "save_access_log",
+    "clear_data_access_log",
 ]
