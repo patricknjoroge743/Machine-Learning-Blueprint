@@ -19,9 +19,9 @@ from sklearn.metrics import (
 from sklearn.model_selection import BaseCrossValidator
 from sklearn.model_selection._split import _BaseKFold
 
-from ..cache.cv_cache import cv_cache_with_classifier_state, cv_cacheable
-from ..cross_validation.scoring import probability_weighted_accuracy
-from ..ensemble.sb_bagging import SequentiallyBootstrappedBaggingClassifier
+from afml.cache.cv_cache import cv_cache_with_classifier_state, cv_cacheable
+from afml.cross_validation.scoring import probability_weighted_accuracy
+from afml.ensemble.sb_bagging import SequentiallyBootstrappedBaggingClassifier
 
 
 def ml_get_train_times(t1: pd.Series, test_times: pd.Series) -> pd.Series:
