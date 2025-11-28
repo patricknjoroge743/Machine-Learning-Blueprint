@@ -290,6 +290,13 @@ def create_robust_cacheable(
 ):
     """
     Factory function to create robust cacheable decorators with data tracking.
+    Args:
+        track_data_access: Whether to track DataFrame accesses
+        dataset_name: Name of the dataset for tracking
+        purpose: One of 'train', 'test', 'validate', 'optimize', 'analyze'
+        use_time_awareness: Whether to use time-series aware cache keys
+    Returns:
+        Decorator function
     """
     import time
     from functools import wraps
@@ -322,16 +329,19 @@ def create_robust_cacheable(
                     cache_key = CacheKeyGenerator.generate_key(func, args, kwargs)
 
                 # Track hit/miss
-                if cache_key in seen_signatures:
-                    cache_stats.record_hit(func_name)
+                try:
+                    cached_func.check_call_in_cache(*args, **kwargs)
                     is_hit = True
+                    cache_stats.record_hit(func_name)
                     logger.debug(f"Cache HIT for {func_name}")
-                else:
+                except:
                     cache_stats.record_miss(func_name)
-                    seen_signatures.add(cache_key)
                     is_hit = False
                     computation_start = time.time()  # Start timing for misses
                     logger.debug(f"Cache MISS for {func_name}")
+
+                # Add to seen_signatures for this session
+                seen_signatures.add(cache_key)
 
             except Exception as e:
                 logger.warning(f"Cache key generation failed for {func_name}: {e}")
