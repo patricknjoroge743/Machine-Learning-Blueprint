@@ -264,7 +264,6 @@ from .data_access_tracker import (
     get_data_tracker,
     log_data_access,
     print_contamination_report,
-    save_access_log,
 )
 
 # Keep existing robust_cacheable imports

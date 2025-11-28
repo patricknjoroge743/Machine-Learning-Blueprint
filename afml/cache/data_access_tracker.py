@@ -79,6 +79,7 @@ class DataAccessTracker:
 
         self.access_log.append(entry)
         logger.debug(f"Logged access: {dataset_name} [{start_date} to {end_date}] for {purpose}")
+        self.save_log()
 
     def save_log(self):
         """Persist access log to disk."""
@@ -292,12 +293,6 @@ def print_contamination_report():
     tracker.print_contamination_report()
 
 
-def save_access_log():
-    """Convenience function to save access log."""
-    tracker = get_data_tracker()
-    tracker.save_log()
-
-
 def clear_data_access_log():
     """Convenience function to clear access log."""
     tracker = get_data_tracker()
@@ -309,6 +304,5 @@ __all__ = [
     "get_data_tracker",
     "log_data_access",
     "print_contamination_report",
-    "save_access_log",
     "clear_data_access_log",
 ]
