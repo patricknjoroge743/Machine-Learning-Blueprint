@@ -5,11 +5,12 @@ import matplotlib.lines as mlines
 import mplfinance as mpf
 import pandas as pd
 
-from ..cache.selective_cleaner import smart_cacheable
-from ..features.moving_averages import calculate_ma_differences, get_ma_crossovers
-from ..features.returns import get_lagged_returns, rolling_autocorr_numba
-from ..util.misc import optimize_dtypes
-from ..util.volatility import get_garman_klass_vol, get_period_vol
+from afml.cache.selective_cleaner import smart_cacheable
+from afml.features.moving_averages import calculate_ma_differences, get_ma_crossovers
+from afml.features.returns import get_lagged_returns, rolling_autocorr_numba
+from afml.util.misc import optimize_dtypes
+from afml.util.volatility import get_garman_klass_vol, get_period_vol
+
 from .signal_processing import get_entries
 from .signals import BollingerStrategy
 
