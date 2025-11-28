@@ -78,8 +78,37 @@ class DataAccessTracker:
         }
 
         self.access_log.append(entry)
-        logger.debug(f"Logged access: {dataset_name} [{start_date} to {end_date}] for {purpose}")
-        self.save_log()
+
+        # AUTO-SAVE: Persist immediately for reliability
+        try:
+            self._save_log_immediate()  # New helper method
+            logger.debug(
+                f"Logged & saved access: {dataset_name} "
+                f"[{start_date} to {end_date}] for {purpose}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to save access log: {e}")
+
+    def _save_log_immediate(self):
+        """Save log immediately (append mode for efficiency)."""
+        try:
+            # Use append mode to avoid rewriting entire file
+            df_entry = pd.DataFrame([self.access_log[-1]])  # Just the last entry
+
+            if self.log_file.exists():
+                # Append to existing file
+                df_entry.to_csv(self.log_file, mode="a", header=False, index=False)
+            else:
+                # Create new file with header
+                df_entry.to_csv(self.log_file, mode="w", header=True, index=False)
+
+        except Exception as e:
+            logger.error(f"Failed to save access log: {e}")
+            # Fall back to full save
+            try:
+                self.save_log()  # Existing method as fallback
+            except Exception as e2:
+                logger.error(f"Fallback save also failed: {e2}")
 
     def save_log(self):
         """Persist access log to disk."""
