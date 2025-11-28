@@ -15,6 +15,7 @@ from .cross_validation import (
     PurgedKFold,
     PurgedSplit,
     analyze_cross_val_scores,
+    analyze_cross_val_scores_calibrated,
     ml_cross_val_score,
     ml_get_train_times,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "ml_get_train_times",
     "ml_cross_val_score",
     "analyze_cross_val_scores",
+    "analyze_cross_val_scores_calibrated",
     "PurgedKFold",
     "PurgedSplit",
     "probability_weighted_accuracy",
