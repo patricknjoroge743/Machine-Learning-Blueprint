@@ -189,7 +189,6 @@ def get_ticks(symbol, start_date, end_date, datetime_index=True, verbose=True):
 
     try:
         start_date, end_date = date_conversion(start_date, end_date)
-        # mt5.symbol_select(symbol, True)
         ticks = mt5.copy_ticks_range(symbol, start_date, end_date, mt5.COPY_TICKS_ALL)
         if ticks is None or len(ticks) == 0:
             logger.warning(
@@ -471,145 +470,6 @@ def load_tick_data(
         return pd.DataFrame()
 
 
-def get_tick_data_in_memory(
-    symbols, start_date, end_date, account_name, clean_data=True, verbose=True
-):
-    """
-    Fetches tick data and returns concatenated DataFrame without saving to disk.
-    Perfect for feeding into bar creation pipelines.
-
-    Args:
-        symbols (Union[str, list]): Symbol or list of symbols to fetch
-        start_date (Union[str, datetime]): Start date for data range
-        end_date (Union[str, datetime]): End date for data range
-        account_name (str): MT5 account name for login
-        clean_data (bool): Whether to apply cleaning to tick data
-        verbose (bool): Whether to log progress details
-
-    Returns:
-        pd.DataFrame: Concatenated tick data for all symbols
-    """
-    if isinstance(symbols, str):
-        symbols = [symbols]
-
-    all_tick_data = []
-
-    for symbol in tqdm(symbols, desc="Fetching symbols in memory"):
-        try:
-            # Login for each symbol (handles connection pooling)
-            logged_in = login_mt5(account_name, verbose=False)
-            if not logged_in:
-                logger.error(f"Failed to login for {symbol}")
-                continue
-
-            # Get raw tick data
-            tick_df = get_ticks(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                datetime_index=True,
-                verbose=False,
-            )
-
-            if tick_df.empty:
-                logger.warning(f"No data retrieved for {symbol}")
-                continue
-
-            # Apply cleaning if requested
-            if clean_data:
-                tick_df = clean_tick_data(tick_df)
-                if tick_df is None or tick_df.empty:
-                    logger.warning(f"Data cleaning removed all data for {symbol}")
-                    continue
-
-            tick_df["symbol"] = symbol  # Add symbol identifier
-            all_tick_data.append(tick_df)
-
-            if verbose:
-                logger.success(f"Fetched {len(tick_df):,} ticks for {symbol}")
-
-        except Exception as e:
-            logger.error(f"Error processing {symbol}: {e}")
-            continue
-        finally:
-            mt5.shutdown()  # Cleanup connection
-
-    if not all_tick_data:
-        logger.error("No data was successfully fetched for any symbol")
-        return pd.DataFrame()
-
-    # Concatenate all symbol data
-    combined_df = pd.concat(all_tick_data, axis=0)
-    combined_df.sort_index(inplace=True)
-
-    logger.success(f"Combined {len(combined_df):,} ticks across {len(all_tick_data)} symbols")
-
-    if verbose:
-        log_df_info(combined_df)
-
-    return combined_df
-
-
-# Complete data pipeline
-def create_multi_timeframe_bars(symbols, start_date, end_date, account_name, bar_configs=None):
-    """
-    End-to-end pipeline: Fetch ticks → Create multiple bar types
-    """
-    if bar_configs is None:
-        bar_configs = [
-            {"bar_type": "time", "bar_size": "H1", "price": "mid_price"},
-            {"bar_type": "tick", "bar_size": 1000, "price": "bid_ask"},
-            {"bar_type": "volume", "bar_size": 1000000, "price": "mid_price"},
-        ]
-
-    # 1. Fetch all tick data in memory
-    tick_data = get_tick_data_in_memory(
-        symbols=symbols,
-        start_date=start_date,
-        end_date=end_date,
-        account_name=account_name,
-        clean_data=True,
-        verbose=True,
-    )
-
-    if tick_data.empty:
-        logger.error("No tick data available for bar creation")
-        return {}
-
-    # 2. Create different bar types
-    bars_dict = {}
-    for config in bar_configs:
-        bar_type = config["bar_type"]
-        bar_size = config["bar_size"]
-
-        logger.info(f"Creating {bar_type} bars with size {bar_size}")
-
-        # Group by symbol and create bars for each
-        symbol_bars = []
-        for symbol in symbols:
-            symbol_ticks = tick_data[tick_data["symbol"] == symbol]
-            if symbol_ticks.empty:
-                continue
-
-            try:
-                bars_df = make_bars(
-                    tick_df=symbol_ticks,
-                    bar_type=bar_type,
-                    bar_size=bar_size,
-                    price=config["price"],
-                    verbose=True,
-                )
-                bars_df["symbol"] = symbol
-                symbol_bars.append(bars_df)
-            except Exception as e:
-                logger.error(f"Failed creating {bar_type} bars for {symbol}: {e}")
-
-        if symbol_bars:
-            bars_dict[f"{bar_type}_{bar_size}"] = pd.concat(symbol_bars, axis=0)
-
-    return bars_dict
-
-
 # --- Main Execution Block ---
 if __name__ == "__main__":
     MAJORS = [
@@ -638,10 +498,10 @@ if __name__ == "__main__":
     # --- 1. User Configuration ---
     CONFIG = {
         "save_path": Path.home() / "tick_data_parquet",
-        "symbols_to_download": CRYPTO,
+        "symbols_to_download": MAJORS[:1],
         "account_to_use": "FundedNext_STLR2_6K",  # This name MUST match the one used in your environment variables
-        "start_date": "2022-01-01",
-        "end_date": "2024-12-31",
+        "start_date": "2016-01-01",
+        "end_date": "2017-12-31",
         "verbose_login": True,
     }
 
