@@ -4,8 +4,6 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
-from bleach import clean
-from matplotlib.pyplot import tick_params
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
 
@@ -13,12 +11,15 @@ from afml.cache import (
     print_contamination_report,
     robust_cacheable,
     time_aware_cacheable,
+    time_aware_data_tracking_cacheable,
 )
 from afml.cache.cache_monitoring import get_cache_monitor
 from afml.cache.data_access_tracker import get_data_tracker
+from afml.cache.robust_cache_keys import robust_cacheable, time_aware_cacheable
 from afml.data_structures.bars import calculate_ticks_per_period, make_bars
 from afml.filters.filters import cusum_filter
-from afml.labeling.triple_barrier import add_vertical_barrier, triple_barrier_labels
+from afml.labeling.triple_barrier import add_vertical_barrier, triple_barrier_events
+from afml.mt5.load_data import load_tick_data, save_data_to_parquet
 from afml.sample_weights.optimized_attribution import (
     get_weights_by_time_decay_optimized,
 )
@@ -27,121 +28,69 @@ from afml.util.misc import value_counts_data
 from afml.util.volatility import get_daily_vol
 
 
-@time_aware_cacheable
-def make_training_bars(
-    tick_df: pd.DataFrame,
-    bar_type: str = "tick",
-    bar_size: Union[int, str] = 100,
-    price: str = "mid_price",
-    verbose: bool = False,
-) -> pd.DataFrame:
-    bars_df = make_bars(
-        tick_df=tick_df,
-        bar_type=bar_type,
-        bar_size=bar_size,
-        price=price,
-        verbose=verbose,
-    )
-    return bars_df
+class TickDataLoader:
+    def __init__(self):
+        self._cache = {}
+
+    def get_tick_data(self, symbol, start_date, end_date, account_name):
+        key = (symbol, start_date, end_date, account_name)
+        if key in self._cache:
+            return self._cache[key]
+
+        tick_params = dict(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            account_name=account_name,
+            columns=["bid", "ask"],
+            verbose=False,
+        )
+        df = load_tick_data(**tick_params)
+        if df.empty:
+            print("Data not found on drive, fetching from MT5...")
+            save_data_to_parquet(symbol, start_date, end_date, account_name)
+            df = load_tick_data(**tick_params)
+
+        self._cache[key] = df
+        return df
 
 
-def load_and_prepare_training_data(
-    symbols: Union[list, str],
-    start_date: str,
-    end_date: str,
-    account_name: str,
-    bar_types=["tick", "time"],
-    bar_sizes: Union[list, str] = TIMEFRAMES,
-    price: str = "mid_price",
-    path: str = None,
-    clean_up: bool = False,
-) -> Dict[str, Dict[str, pd.DataFrame]]:
-    """
-    Load and prepare training data with contamination tracking.
+loader = TickDataLoader()
 
-    This function is tracked to ensure we don't accidentally
-    use test data during training iterations.
 
-    Args:
-        symbols (Union[str, list, tuple]): A single symbol or a collection of symbols to download.
-        start_date (Union[str, dt, pd.Timestamp]): The start date for the data range.
-        end_date (Union[str, dt, pd.Timestamp]): The end date for the data range.
-        account_name (str): The name of the account used for the download.
-        bar_types (Union[str, list, tuple]): Types of bars to generate (e.g., 'tick', 'time').
-        bar_sizes (Union[str, int, list, tuple]): Sizes for the bars (e.g., 'M1', 100).
-        price (str): Price field strategy ('bid', 'ask', 'mid_price', 'bid_ask').
-        path (Union[str, Path]): The root folder where data will be saved.
-        clean_up (bool): Whether to delete local tick data after processing.
-    Returns:
-        Dict[str, Dict[str, pd.DataFrame]]: Nested dictionary with symbols as keys,
-        each containing another dictionary with bar types as keys and their corresponding DataFrames.
-    """
-    from afml.mt5.load_data import load_tick_data, save_data_to_parquet
+def load_and_prepare_training_data(symbol, start_date, end_date, account_name, configs: List[Dict]):
+    """ """
+    tick_df = loader.get_tick_data(symbol, start_date, end_date, account_name)
+    data = {}
 
-    if isinstance(symbols, str):
-        symbols = [symbols]
-    if isinstance(bar_types, str):
-        bar_types = [bar_types]
-    if isinstance(bar_sizes, str):
-        bar_sizes = [bar_sizes]
+    @time_aware_cacheable
+    def make_training_bars(tick_df, bar_type, bar_size, price):
+        return make_bars(tick_df, bar_type, bar_size, price)
 
-    data = {symbol: {bt: {} for bt in bar_types} for symbol in symbols}
-    tick_params = dict(
-        start_date=start_date,
-        end_date=end_date,
-        account_name=account_name,
-        columns=["bid", "ask"],
-        path=path,
-        verbose=False,
-    )
-    for symbol in symbols:
-        tick_params["symbol"] = symbol
-        try:
-            tick_df = load_tick_data(**tick_params)
-        except:
-            save_data_to_parquet(symbol, start_date, end_date, account_name, path)
-            tick_df = load_tick_data(**tick_params)
-        for bar_type in bar_types:
-            print(f"\nGenerating {bar_type} bars for {symbol.upper()}...")
-            for bar_size in bar_sizes:
-                if bar_type == "tick" and isinstance(bar_size, str):
-                    bar_size = calculate_ticks_per_period(tick_df, bar_size)
-                df = make_training_bars(
-                    tick_df=tick_df,
-                    bar_type=bar_type,
-                    bar_size=bar_size,
-                    price=price,
-                    verbose=False,
-                )
-                tracker = get_data_tracker()
-                tracker.log_access(
-                    dataset_name=f"{symbol}_{bar_type}_{bar_size}".lower(),
-                    start_date=df.index[0],
-                    end_date=df.index[-1],
-                    purpose="train",
-                    data_shape=df.shape,
-                )
-                tracker.save_log()
-                print(f" - Bar Size: {bar_size} ({df.shape[0]:,} rows) ")
-                data[symbol][bar_type][bar_size] = df
-        if clean_up:
-            # Clean up local tick data to save space
-            dirpath = (
-                Path(path) / symbol.upper() if path is not None else DATA_PATH / symbol.upper()
-            )
-            try:
-                if dirpath.exists():
-                    shutil.rmtree(dirpath)
-                    print("Folder deleted successfully.")
-                else:
-                    print("Folder does not exist.")
-            except Exception as e:
-                print(f"Error: {e}")
+    for config in configs:
+        bar_size = config["bar_size"]
+        bar_type = config["bar_type"]
+        price = config["price"]
+        if bar_type == "tick" and isinstance(bar_size, str):
+            bar_size = calculate_ticks_per_period(tick_df, bar_size)
+        df = make_training_bars(tick_df, bar_type, bar_size, price)
+        data.setdefault(bar_type, dict)
+        data[bar_type][f"{bar_size}_{price}"] = df
+
+        tracker = get_data_tracker()
+        tracker.log_access(
+            start_date=df.index[0],
+            end_date=df.index[-1],
+            dataset_name=f"{symbol}_{bar_type}_{bar_size}_{price}".lower(),
+            purpose="train",
+            data_shape=df.shape,
+        )
+        tracker.save_log()
 
     return data
 
 
-@robust_cacheable
+@time_aware_cacheable
 def create_feature_engineering_pipeline(data: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
     Compute all features with aggressive caching.
@@ -151,47 +100,26 @@ def create_feature_engineering_pipeline(data: pd.DataFrame, config: Dict) -> pd.
     - Cached: ~0.8 seconds (150x speedup)
     - Hit rate: 98.2%
     """
-    import pandas_ta as ta
-
-    features = pd.DataFrame(index=data.index)
-
-    # Volatility features (expensive - 45s first time)
-    ret = data.pct_change()
-    features["volatility_20"] = ret.rolling(20).std()
-    features["volatility_50"] = ret.rolling(50).std()
-    features["vol_regime"] = classify_volatility_regime(
-        features[["volatility_20", "volatility_50"]]
-    )
-
-    # Momentum indicators (30s first time)
-    features["rsi_14"] = data.ta.rsi(14)
-    features["macd"] = data.ta.macd(12, 26, 9).iloc[:, 2]
-    features["adx"] = data.ta.adx(14).iloc[:, 0]
-
-    # Microstructure features (25s first time)
-    features["volume_imbalance"] = compute_volume_imbalance(data)
-    features["tick_rule"] = compute_tick_classification(data)
-    features["vpin"] = compute_vpin(data, config["vpin_window"])
-
-    # Market regime (20s first time)
-    features["market_regime"] = classify_market_regime(data)
-
+    fn = config["func"]
+    params = config["params"]
+    features = fn(data, **params)
     return features
 
 
 @robust_cacheable
-def generate_labels_triple_barrier(
+def generate_events_triple_barrier(
     data: pd.DataFrame,
-    lookback: int,
-    profit_target: float = 0.01,
-    stop_loss: float = 0.005,
+    target: pd.Series,
+    t_events: pd.DatetimeIndex,
+    profit_target: float = 1,
+    stop_loss: float = 1,
     max_holding_period: int = 100,
     min_ret: float = 0.0,
     side_prediction: pd.Series = None,
     vertical_barrier_zero: bool = True,
 ) -> pd.Series:
     """
-    Generate labels using triple-barrier method.
+    Generate events using triple-barrier method.
 
     Performance:
     - First run: ~90 seconds
@@ -203,12 +131,10 @@ def generate_labels_triple_barrier(
     # Set up for labeling
     if isinstance(max_holding_period, int):
         max_holding_period = dict(num_bars=max_holding_period)
-    target = get_daily_vol(close, lookback)  # volatility target
-    t_events = cusum_filter(close, target.mean())  # filtered trade events
 
     # Compute barriers
     vertical_barrier_times = add_vertical_barrier(t_events, close, **max_holding_period)
-    labels = triple_barrier_labels(
+    events = triple_barrier_events(
         close=close,
         target=target,
         t_events=t_events,
@@ -222,12 +148,12 @@ def generate_labels_triple_barrier(
         verbose=False,
     )
 
-    return labels
+    return events
 
 
 @robust_cacheable
 def compute_sample_weights_time_decay(
-    labels: pd.DataFrame,
+    events: pd.DataFrame,
     close_index: pd.DatetimeIndex,
     attribution: str = None,
     decay_factor: float = 0.95,
@@ -242,23 +168,23 @@ def compute_sample_weights_time_decay(
     - Cached: ~0.1 seconds (50x speedup)
     """
     weights = get_weights_by_time_decay_optimized(
-        labels,
+        events,
         close_index,
         last_weight=decay_factor,
         linear=linear,
-        av_uniqueness=labels["tW"],
+        av_uniqueness=events["tW"],
         verbose=False,
     )
     if attribution != "return":
         return weights
     else:
-        return weights * labels["w"]
+        return weights * events["w"]
 
 
 @time_aware_cacheable
 def train_model_with_cv(
     features: pd.DataFrame,
-    labels: pd.Series,
+    events: pd.Series,
     sample_weights: np.ndarray,
     param_grid: Dict,
     cv_splits: int = 5,
@@ -274,10 +200,10 @@ def train_model_with_cv(
     from ..cross_validation import PurgedKFold
 
     # Time-series CV to prevent lookahead bias
-    cv = PurgedKFold(n_splits=cv_splits, samples_info_sets=labels["t1"])
+    cv = PurgedKFold(n_splits=cv_splits, samples_info_sets=events["t1"])
 
     # Set scoring method
-    if set(labels["bin"].values) == {0, 1}:
+    if set(events["bin"].values) == {0, 1}:
         scoring = "f1"  # f1 for meta-labeling
     else:
         scoring = "neg_log_loss"  # symmetric towards all cases
@@ -287,7 +213,7 @@ def train_model_with_cv(
     grid_search = GridSearchCV(model, param_grid, cv=cv, scoring=scoring, n_jobs=-1, verbose=1)
 
     # Fit with sample weights
-    grid_search.fit(features, labels["bin"], sample_weight=sample_weights)
+    grid_search.fit(features, events["bin"], sample_weight=sample_weights)
 
     # Extract results
     best_model = grid_search.best_estimator_
@@ -346,18 +272,18 @@ def develop_production_model(
     print(f"✓ Generated {len(features.columns)} features")
 
     # Step 3: Label generation (cached - 95.7% hit rate)
-    print("\n[Step 3/6] Generating labels...")
-    labels = generate_labels_triple_barrier(bars, **label_config)
-    print(f"✓ Generated labels: \n{value_counts_data(labels['bin'])}")
+    print("\n[Step 3/6] Generating events...")
+    events = generate_events_triple_barrier(bars, **label_config)
+    print(f"✓ Generated events: \n{value_counts_data(events['bin'])}")
 
     # Step 4: Sample weights (cached)
     print("\n[Step 4/6] Computing sample weights...")
-    sample_weights = compute_sample_weights_time_decay(labels, bars.index, **sample_weight_params)
+    sample_weights = compute_sample_weights_time_decay(events, bars.index, **sample_weight_params)
     print(f"✓ Computed time-decay weights")
 
     # Step 5: Model training with CV (cached)
     print("\n[Step 5/6] Training model with cross-validation...")
-    best_model, cv_results = train_model_with_cv(features, labels, sample_weights, model_params)
+    best_model, cv_results = train_model_with_cv(features, events, sample_weights, model_params)
     print(f"✓ Best CV score: {cv_results['best_score']:.4f}")
     print(f"✓ Best params: {cv_results['best_params']}")
 
