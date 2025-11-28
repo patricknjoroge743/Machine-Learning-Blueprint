@@ -4,17 +4,13 @@ Based on "Price Action Analysis Toolkit Development (Part 36)"
 Optimized for backtesting with AFML cache system integration.
 """
 
-import json
 import socket
-import struct
 import threading
-import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -257,7 +253,7 @@ class AFMLBacktestBridge:
         - ATR (14-period)
         - EMA envelope bands
         """
-        import ta
+        import pandas_ta as ta
 
         df = df.copy()
 
