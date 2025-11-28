@@ -424,13 +424,21 @@ def load_tick_data(
     try:
         filters = [("time", ">=", start_dt), ("time", "<=", end_dt)]
 
-        ddf = dd.read_parquet(
-            fname,
-            columns=columns,
-            filters=filters,
-            engine="pyarrow",
-        )
+        if not fname.exists():
+            logger.error(f"Data directory {fname} not found for {symbol}")
+            return pd.DataFrame()
+
+        ddf = dd.read_parquet(fname, columns=columns, filters=filters, engine="pyarrow")
         df = ddf.compute()
+
+        if df.empty:
+            logger.warning(
+                f"No tick data found for {symbol} between {start_dt} and {end_dt} "
+                f"in account {account_name}"
+            )
+            return pd.DataFrame()
+
+        logger.success(f"Loaded {len(df):,} rows of {symbol} tick data for account {account_name}")
 
         to_drop = []
         for col in df.columns:
@@ -459,7 +467,6 @@ def load_tick_data(
         if not df.index.is_monotonic_increasing:
             df.sort_index(inplace=True)
 
-        logger.success(f"Loaded {len(df):,} rows of {symbol} tick data for account {account_name}")
         if verbose:
             log_df_info(df)
 
