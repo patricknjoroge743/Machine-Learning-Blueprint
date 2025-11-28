@@ -260,6 +260,7 @@ def initialize_cache_system():
 # Import robust cache key generation - NOW SAFE (memory and cache_stats exist)
 from .data_access_tracker import (
     DataAccessTracker,
+    clear_data_access_log,
     get_data_tracker,
     log_data_access,
     print_contamination_report,
