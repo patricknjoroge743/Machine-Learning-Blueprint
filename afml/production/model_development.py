@@ -85,7 +85,6 @@ def load_and_prepare_training_data(symbol, start_date, end_date, account_name, c
             purpose="train",
             data_shape=df.shape,
         )
-        tracker.save_log()
 
     return data
 
