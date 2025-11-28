@@ -9,6 +9,7 @@ import re
 import time
 from datetime import datetime as dt
 from datetime import timedelta
+from itertools import product
 from pathlib import Path
 from typing import Callable, Literal, Optional, Tuple, Union
 
@@ -651,3 +652,15 @@ def get_folder_size(path: str) -> float:
     folder = Path(path)
     total_size = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
     return total_size / (1024**2)  # MB
+
+
+def expand_params(params: dict) -> list[dict]:
+    """
+    Expands a dictionary of parameters with list values into a list of all combinations.
+    :param params: Dictionary where keys are parameter names and values are lists of possible values.
+    :return: List of dictionaries, each representing a unique combination of parameters.
+    """
+    keys = list(params.keys())
+    values = [params[k] for k in keys]
+    combos = product(*values)
+    return [dict(zip(keys, combo)) for combo in combos]
