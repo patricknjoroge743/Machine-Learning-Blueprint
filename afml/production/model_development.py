@@ -4,8 +4,11 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from torch import threshold
 
 from afml.cache import (
     print_contamination_report,
@@ -14,17 +17,24 @@ from afml.cache import (
     time_aware_data_tracking_cacheable,
 )
 from afml.cache.cache_monitoring import get_cache_monitor
-from afml.cache.data_access_tracker import get_data_tracker
+from afml.cache.cv_cache import cv_cacheable
+from afml.cache.data_access_tracker import get_data_tracker, log_data_access
 from afml.cache.robust_cache_keys import robust_cacheable, time_aware_cacheable
 from afml.data_structures.bars import calculate_ticks_per_period, make_bars
 from afml.filters.filters import cusum_filter
-from afml.labeling.triple_barrier import add_vertical_barrier, triple_barrier_events
+from afml.labeling.triple_barrier import (
+    add_vertical_barrier,
+    get_event_weights,
+    triple_barrier_labels,
+)
 from afml.mt5.load_data import load_tick_data, save_data_to_parquet
 from afml.sample_weights.optimized_attribution import (
     get_weights_by_time_decay_optimized,
 )
+from afml.strategies.signal_processing import get_entries
+from afml.strategies.signals import BaseStrategy
 from afml.util.constants import DATA_PATH, TIMEFRAMES
-from afml.util.misc import value_counts_data
+from afml.util.misc import expand_params, value_counts_data
 from afml.util.volatility import get_daily_vol
 
 
@@ -47,7 +57,7 @@ class TickDataLoader:
         )
         df = load_tick_data(**tick_params)
         if df.empty:
-            print("Data not found on drive, fetching from MT5...")
+            logger.info("Data not found on drive, fetching from MT5...")
             save_data_to_parquet(symbol, start_date, end_date, account_name)
             df = load_tick_data(**tick_params)
 
@@ -58,33 +68,34 @@ class TickDataLoader:
 loader = TickDataLoader()
 
 
-def load_and_prepare_training_data(symbol, start_date, end_date, account_name, configs: List[Dict]):
-    """ """
+@time_aware_cacheable
+def get_bar_size(tick_df, bar_size):
+    return calculate_ticks_per_period(tick_df, bar_size)
+
+
+@time_aware_cacheable
+def load_and_prepare_training_data(
+    symbol,
+    start_date,
+    end_date,
+    account_name,
+    bar_type,
+    bar_size,
+    price,
+):
     tick_df = loader.get_tick_data(symbol, start_date, end_date, account_name)
-    data = {}
 
-    @time_aware_cacheable
-    def make_training_bars(tick_df, bar_type, bar_size, price):
-        return make_bars(tick_df, bar_type, bar_size, price)
+    if bar_type == "tick" and isinstance(bar_size, str):
+        bar_size = get_bar_size(tick_df, bar_size)
 
-    for config in configs:
-        bar_size = config["bar_size"]
-        bar_type = config["bar_type"]
-        price = config["price"]
-        if bar_type == "tick" and isinstance(bar_size, str):
-            bar_size = calculate_ticks_per_period(tick_df, bar_size)
-        df = make_training_bars(tick_df, bar_type, bar_size, price)
-        data.setdefault(bar_type, dict)
-        data[bar_type][f"{bar_size}_{price}"] = df
-
-        tracker = get_data_tracker()
-        tracker.log_access(
-            start_date=df.index[0],
-            end_date=df.index[-1],
-            dataset_name=f"{symbol}_{bar_type}_{bar_size}_{price}".lower(),
-            purpose="train",
-            data_shape=df.shape,
-        )
+    data = make_bars(tick_df, bar_type, bar_size, price)
+    log_data_access(
+        dataset_name=f"{symbol}_{bar_type}_{bar_size}_{price}".lower(),
+        start_date=data.index[0],
+        end_date=data.index[-1],
+        purpose="train",
+        data_shape=data.shape,
+    )
 
     return data
 
@@ -92,29 +103,22 @@ def load_and_prepare_training_data(symbol, start_date, end_date, account_name, c
 @time_aware_cacheable
 def create_feature_engineering_pipeline(data: pd.DataFrame, config: Dict) -> pd.DataFrame:
     """
-    Compute all features with aggressive caching.
-
-    Performance:
-    - First run: ~120 seconds
-    - Cached: ~0.8 seconds (150x speedup)
-    - Hit rate: 98.2%
+    Compute all features with caching.
     """
-    fn = config["func"]
-    params = config["params"]
-    features = fn(data, **params)
+    func = config["func"]
+    features = func(data, **config["params"])
     return features
 
 
-@robust_cacheable
+@time_aware_cacheable
 def generate_events_triple_barrier(
     data: pd.DataFrame,
-    target: pd.Series,
-    t_events: pd.DatetimeIndex,
+    target_lookback: int,
+    strategy: BaseStrategy,
     profit_target: float = 1,
     stop_loss: float = 1,
-    max_holding_period: int = 100,
+    max_holding_period: Dict[str, int] = dict(days=1),
     min_ret: float = 0.0,
-    side_prediction: pd.Series = None,
     vertical_barrier_zero: bool = True,
 ) -> pd.Series:
     """
@@ -125,20 +129,17 @@ def generate_events_triple_barrier(
     - Cached: ~0.5 seconds (180x speedup)
     - Hit rate: 95.7%
     """
-    close = data.close
-
-    # Set up for labeling
-    if isinstance(max_holding_period, int):
-        max_holding_period = dict(num_bars=max_holding_period)
-
     # Compute barriers
-    vertical_barrier_times = add_vertical_barrier(t_events, close, **max_holding_period)
-    events = triple_barrier_events(
-        close=close,
-        target=target,
-        t_events=t_events,
-        vertical_barrier_times=vertical_barrier_times,
-        side_prediction=side_prediction,
+    close = data["close"]
+    target = get_daily_vol(close, target_lookback)
+    side, t_events = get_entries(strategy, data, filter_threshold=target.mean())
+    vb = add_vertical_barrier(t_events, close, **max_holding_period)
+    events = triple_barrier_labels(
+        close,
+        target,
+        t_events,
+        vertical_barrier_times=vb,
+        side_prediction=side,
         pt_sl=[profit_target, stop_loss],
         min_ret=min_ret,
         min_pct=0.05,
@@ -146,14 +147,13 @@ def generate_events_triple_barrier(
         drop=True,
         verbose=False,
     )
-
     return events
 
 
-@robust_cacheable
+@time_aware_cacheable
 def compute_sample_weights_time_decay(
     events: pd.DataFrame,
-    close_index: pd.DatetimeIndex,
+    close: pd.Series,
     attribution: str = None,
     decay_factor: float = 0.95,
     linear: bool = True,
@@ -166,27 +166,39 @@ def compute_sample_weights_time_decay(
     - First run: ~5 seconds
     - Cached: ~0.1 seconds (50x speedup)
     """
+    events = get_event_weights(events, close)
     weights = get_weights_by_time_decay_optimized(
         events,
-        close_index,
+        close.index,
         last_weight=decay_factor,
         linear=linear,
         av_uniqueness=events["tW"],
         verbose=False,
     )
-    if attribution != "return":
-        return weights
-    else:
+    if attribution == "return":
         return weights * events["w"]
+    elif attribution == "uniqueness":
+        return weights * events["tW"]
+    else:
+        return weights
 
 
-@time_aware_cacheable
+@robust_cacheable
 def train_model_with_cv(
     features: pd.DataFrame,
-    events: pd.Series,
+    events: pd.DataFrame,
     sample_weights: np.ndarray,
+    pipe_clf: Pipeline,
     param_grid: Dict,
     cv_splits: int = 5,
+    bagging_n_estimators: int = 0,
+    bagging_max_samples: float = 1.0,
+    bagging_max_features: float = 1.0,
+    rnd_search_iter: int = 0,
+    n_jobs: int = -1,
+    pct_embargo: float = 0.01,
+    random_state: int = None,
+    verbose: bool = False,
 ) -> Tuple[RandomForestClassifier, Dict]:
     """
     Train model with cross-validation.
@@ -196,31 +208,30 @@ def train_model_with_cv(
     - First run: ~300 seconds (5 minutes)
     - Cached: ~2 seconds (150x speedup)
     """
-    from ..cross_validation import PurgedKFold
+    from ..cross_validation.hyperfit import clf_hyper_fit
 
-    # Time-series CV to prevent lookahead bias
-    cv = PurgedKFold(n_splits=cv_splits, samples_info_sets=events["t1"])
-
-    # Set scoring method
-    if set(events["bin"].values) == {0, 1}:
-        scoring = "f1"  # f1 for meta-labeling
-    else:
-        scoring = "neg_log_loss"  # symmetric towards all cases
-
-    # Grid search
-    model = RandomForestClassifier(random_state=42)
-    grid_search = GridSearchCV(model, param_grid, cv=cv, scoring=scoring, n_jobs=-1, verbose=1)
-
-    # Fit with sample weights
-    grid_search.fit(features, events["bin"], sample_weight=sample_weights)
-
-    # Extract results
-    best_model = grid_search.best_estimator_
-    cv_results = {
-        "best_params": grid_search.best_params_,
-        "best_score": grid_search.best_score_,
-        "cv_results": pd.DataFrame(grid_search.cv_results_),
-    }
+    train_idx = features.dropna().index.intersection(events.index)
+    X = features.loc[train_idx]
+    y = events.loc[train_idx, "bin"]
+    t1 = events.loc[train_idx, "t1"]
+    w = sample_weights.loc[train_idx]
+    best_model, cv_results = clf_hyper_fit(
+        X,
+        y,
+        t1,
+        pipe_clf,
+        param_grid,
+        cv_splits,
+        bagging_n_estimators,
+        bagging_max_samples,
+        bagging_max_features,
+        rnd_search_iter,
+        n_jobs,
+        pct_embargo,
+        random_state,
+        verbose,
+        sample_weight=w,
+    )
 
     return best_model, cv_results
 
@@ -229,10 +240,12 @@ def develop_production_model(
     symbol: str,
     train_start: str,
     train_end: str,
+    data_config: Dict,
     feature_config: Dict,
     label_config: Dict,
     model_params: Dict,
     sample_weight_params: Dict,
+    reports: bool = False,
 ) -> Tuple[RandomForestClassifier, List[str], Dict]:
     """
     Complete model development pipeline with aggressive caching.
@@ -262,12 +275,12 @@ def develop_production_model(
 
     # Step 1: Load data (tracked for contamination)
     print("\n[Step 1/6] Loading training data...")
-    tick_data, bars = load_and_prepare_training_data(symbol, train_start, train_end)
-    print(f"✓ Loaded {len(tick_data):,} samples from {train_start} to {train_end}")
+    bars = load_and_prepare_training_data(symbol, train_start, train_end, **data_config)
+    print(f"✓ Loaded {len(bars):,} samples from {train_start} to {train_end}")
 
     # Step 2: Feature engineering (cached - 98.2% hit rate)
     print("\n[Step 2/6] Computing features...")
-    features = create_feature_engineering_pipeline(tick_data, bars, feature_config)
+    features = create_feature_engineering_pipeline(bars, feature_config)
     print(f"✓ Generated {len(features.columns)} features")
 
     # Step 3: Label generation (cached - 95.7% hit rate)
@@ -277,36 +290,40 @@ def develop_production_model(
 
     # Step 4: Sample weights (cached)
     print("\n[Step 4/6] Computing sample weights...")
-    sample_weights = compute_sample_weights_time_decay(events, bars.index, **sample_weight_params)
+    sample_weights = compute_sample_weights_time_decay(events, bars.close, **sample_weight_params)
     print(f"✓ Computed time-decay weights")
 
     # Step 5: Model training with CV (cached)
     print("\n[Step 5/6] Training model with cross-validation...")
-    best_model, cv_results = train_model_with_cv(features, events, sample_weights, model_params)
+    best_model, cv_results = train_model_with_cv(features, events, sample_weights, **model_params)
     print(f"✓ Best CV score: {cv_results['best_score']:.4f}")
     print(f"✓ Best params: {cv_results['best_params']}")
 
     # Step 6: Feature importance analysis
     print("\n[Step 6/6] Analyzing feature importance...")
     feature_importance = pd.DataFrame(
-        {"feature": features.columns, "importance": best_model.feature_importances_}
+        {
+            "feature": features.columns,
+            "importance": best_model.named_steps["clf"].feature_importances_,
+        }
     ).sort_values("importance", ascending=False)
 
     print("\nTop 10 Features:")
     print(feature_importance.head(10).to_string(index=False))
 
-    # Cache performance report
-    print("\n" + "=" * 70)
-    print("CACHE PERFORMANCE REPORT")
-    print("=" * 70)
-    monitor = get_cache_monitor()
-    monitor.print_summary()
+    if reports:
+        # Cache performance report
+        print("\n" + "=" * 70)
+        print("CACHE PERFORMANCE REPORT")
+        print("=" * 70)
+        monitor = get_cache_monitor()
+        monitor.print_health_report()
 
-    # Data contamination check
-    print("\n" + "=" * 70)
-    print("DATA CONTAMINATION CHECK")
-    print("=" * 70)
-    print_contamination_report()
+        # Data contamination check
+        print("\n" + "=" * 70)
+        print("DATA CONTAMINATION CHECK")
+        print("=" * 70)
+        print_contamination_report()
 
     metrics = {
         "cv_results": cv_results,
