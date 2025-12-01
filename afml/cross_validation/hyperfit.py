@@ -6,7 +6,6 @@ from sklearn.ensemble import BaggingClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
 
-from ..cache import cv_cacheable
 from .cross_validation import PurgedKFold
 
 
@@ -19,14 +18,13 @@ class MyPipeline(Pipeline):
         return super().fit(X, y, **fit_params)
 
 
-@cv_cacheable
 def clf_hyper_fit(
-    feat,
+    features,
     labels,
     t1,
     pipe_clf,
     param_grid,
-    cv=3,
+    cv=5,
     bagging_n_estimators=0,
     bagging_max_samples=1.0,
     bagging_max_features=1.0,
@@ -46,7 +44,7 @@ def clf_hyper_fit(
 
     Parameters
     ----------
-    feat : pd.DataFrame
+    features : pd.DataFrame
         Feature matrix for training.
     labels : pd.Series
         Target labels for classification.
@@ -134,14 +132,14 @@ def clf_hyper_fit(
     ... }
     >>> # Without bagging
     >>> model = clf_hyper_fit(
-    ...     feat=X, labels=y, t1=t1,
+    ...     features=X, labels=y, t1=t1,
     ...     pipe_clf=pipe, param_grid=param_grid,
     ...     cv=5, n_jobs=-1
     ... )
     >>> # With bagging (using average uniqueness from sequential bootstrap)
     >>> avg_uniqueness = 0.65  # calculated from your data
     >>> model = clf_hyper_fit(
-    ...     feat=X, labels=y, t1=t1,
+    ...     features=X, labels=y, t1=t1,
     ...     pipe_clf=pipe, param_grid=param_grid,
     ...     cv=5, bagging_n_estimators=100,
     ...     bagging_max_samples=avg_uniqueness,
@@ -196,13 +194,15 @@ def clf_hyper_fit(
                 refit=True,
             )
 
-        gs = gs.fit(feat, labels, **fit_params).best_estimator_
+        gs = gs.fit(features, labels, **fit_params)
         cv_results = {
             "best_params": gs.best_params_,
             "best_score": gs.best_score_,
             "cv_results": pd.DataFrame(gs.cv_results_),
             "scoring": scoring,
         }
+        gs = gs.best_estimator_
+
         # 2) fit validated model on the entirety of the data
         if bagging_n_estimators > 0:
             # Create base pipeline with single-threaded estimators to avoid nested parallelism
@@ -226,7 +226,7 @@ def clf_hyper_fit(
             if sample_weight_key in fit_params:
                 bag_fit_params["sample_weight"] = fit_params[sample_weight_key]
 
-            bag = bag.fit(feat, labels, **bag_fit_params)
+            bag = bag.fit(features, labels, **bag_fit_params)
             return bag, cv_results  # Return BaggingClassifier directly
 
         return gs, cv_results
