@@ -70,14 +70,14 @@ class PurgedKFold(_BaseKFold):
     The train is purged of observations overlapping test-label intervals.
     Test set is assumed contiguous (shuffle=False), w/o training samples in between.
 
-    :param n_splits: (int) The number of splits. Default to 3.
+    :param n_splits: (int) The number of splits. Default to 5.
     :param t1: (pd.Series) The information range on which each record is constructed from
         *t1.index*: Time when the information extraction started.
         *t1.value*: Time when the information extraction ended.
     :param pct_embargo: (float) Percent that determines the embargo size. Default to 0.01,
     """
 
-    def __init__(self, n_splits=3, t1=None, pct_embargo=0.01):
+    def __init__(self, n_splits=5, t1=None, pct_embargo=0.01):
         if not isinstance(t1, pd.Series):
             raise ValueError("Label Through Dates must be a pd.Series")
 
