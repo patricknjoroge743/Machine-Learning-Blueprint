@@ -30,7 +30,7 @@ from ..strategies.signal_processing import get_entries
 from ..strategies.trading_strategies import BaseStrategy
 from ..util.misc import date_conversion, value_counts_data
 from ..util.pipelines import make_custom_pipeline, set_pipeline_params
-from .util import ModelFileManager
+from .utils import ModelFileManager
 
 
 class TickDataLoader:
