@@ -19,7 +19,12 @@ class BaseStrategy(ABC):
 
     @abstractmethod
     def get_objective(self) -> str:
-        """Return strategy objective from {'mean_reversion', 'trend-following', 'momentum', 'pairs'}"""
+        """Return strategy objective from {'mean_reversion', 'trend', 'momentum', 'pairs'}"""
+        pass
+
+    @abstractmethod
+    def on_crossover(self) -> bool:
+        """Whether strategy signals are from crossovers"""
         pass
 
 
@@ -28,7 +33,7 @@ class BollingerStrategy(BaseStrategy):
     BollingerStrategy implements a mean reversion trading strategy using Bollinger Bands.
     Attributes:
         window (int): The lookback period for calculating Bollinger Bands.
-        num_std (float): The number of standard deviations for the bands.
+        std (float): The number of standard deviations for the bands.
         objective (str): The strategy objective, default is "mean_reversion".
     Methods:
         generate_signals(data: pd.DataFrame) -> pd.Series:
@@ -41,9 +46,11 @@ class BollingerStrategy(BaseStrategy):
             Returns the objective of the strategy.
     """
 
-    def __init__(self, window: int = 20, num_std: float = 2.0, objective: str = "mean_reversion"):
+    def __init__(
+        self, window: int = 20, std: float = 2.0, objective: str = "mean_reversion"
+    ):
         self.window = window
-        self.num_std = num_std
+        self.std = std
         self.objective = objective
 
     def generate_signals(self, data: pd.DataFrame) -> pd.Series:
@@ -52,20 +59,23 @@ class BollingerStrategy(BaseStrategy):
 
         # Calculate Bollinger Bands
         upper_band, _, lower_band = talib.BBANDS(
-            close, timeperiod=self.window, nbdevup=self.num_std, nbdevdn=self.num_std
+            close, timeperiod=self.window, nbdevup=self.std, nbdevdn=self.std
         )
 
         # Generate signals
-        signals = pd.Series(0, index=data.index, dtype="int8", name="side")
+        signals = pd.Series(0, index=data.index, dtype="int8", name="signal")
         signals[(close >= upper_band)] = -1  # Sell signal (mean reversion)
         signals[(close <= lower_band)] = 1  # Buy signal (mean reversion)
         return signals
 
     def get_strategy_name(self) -> str:
-        return f"Bollinger_w{self.window}_std{self.num_std}"
+        return f"Bollinger_w{self.window}_std{self.std}"
 
     def get_objective(self) -> str:
         return self.objective
+
+    def on_crossover(self) -> bool:
+        return True
 
 
 class MACrossoverStrategy(BaseStrategy):
@@ -74,7 +84,7 @@ class MACrossoverStrategy(BaseStrategy):
     Attributes:
         fast_window (int): Window size for the fast moving average.
         slow_window (int): Window size for the slow moving average.
-        objective (str): The objective of the strategy (default: "trend_following").
+        objective (str): The objective of the strategy (default: "trend").
     Methods:
         generate_signals(data: pd.DataFrame) -> pd.Series:
             Generates trading signals based on the crossover of fast and slow moving averages.
@@ -86,7 +96,10 @@ class MACrossoverStrategy(BaseStrategy):
     """
 
     def __init__(
-        self, fast_window: int = 10, slow_window: int = 30, objective: str = "trend_following"
+        self,
+        fast_window: int = 10,
+        slow_window: int = 30,
+        objective: str = "trend",
     ):
         self.fast_window = fast_window
         self.slow_window = slow_window
@@ -101,9 +114,13 @@ class MACrossoverStrategy(BaseStrategy):
         slow_ma = talib.MA(close, self.slow_window)
 
         # Generate signals
-        signals = pd.Series(0, index=data.index, dtype="int8", name="side")
-        signals[(fast_ma > slow_ma)] = 1  # Long signal when fast MA crosses above slow MA
-        signals[(fast_ma < slow_ma)] = -1  # Short signal when fast MA crosses below slow MA
+        signals = pd.Series(0, index=data.index, dtype="int8", name="signal")
+        signals[(fast_ma > slow_ma)] = (
+            1  # Long signal when fast MA crosses above slow MA
+        )
+        signals[
+            (fast_ma < slow_ma)
+        ] = -1  # Short signal when fast MA crosses below slow MA
         return signals
 
     def get_strategy_name(self) -> str:
@@ -111,3 +128,6 @@ class MACrossoverStrategy(BaseStrategy):
 
     def get_objective(self) -> str:
         return self.objective
+
+    def on_crossover(self) -> bool:
+        return True
