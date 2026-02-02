@@ -413,7 +413,7 @@ def get_bar_size(tick_df, bar_size):
 
 @cacheable(time_aware=True)
 def load_and_prepare_training_data(
-    symbol, start_date, end_date, account_name, bar_type, bar_size, price
+    symbol, start_date, end_date, account_name, bar_type, bar_size, price, path=None
 ):
     """
     Load tick data and construct bars for training.
@@ -434,6 +434,8 @@ def load_and_prepare_training_data(
         Bar size. If 'tick' and str, converted via `get_bar_size`.
     price : str
         Price type ('bid', 'ask', 'mid_price', 'bid_ask').
+    path : str
+        Path to data file of OHLC bars.
 
     Returns
     -------
@@ -446,13 +448,16 @@ def load_and_prepare_training_data(
     - Cached for reproducibility.
     - Prevents data leakage via time-aware caching.
     """
+    if path:
+        data = pd.read_parquet(path)
+    else:
+        tick_df = loader.get_tick_data(symbol, start_date, end_date, account_name)
 
-    tick_df = loader.get_tick_data(symbol, start_date, end_date, account_name)
+        if bar_type == "tick" and isinstance(bar_size, str):
+            bar_size = get_bar_size(tick_df, bar_size)
 
-    if bar_type == "tick" and isinstance(bar_size, str):
-        bar_size = get_bar_size(tick_df, bar_size)
+        data = make_bars(tick_df, bar_type, bar_size, price)
 
-    data = make_bars(tick_df, bar_type, bar_size, price)
     log_data_access(
         dataset_name=f"{symbol}_{bar_type}_{bar_size}_{price}".lower(),
         start_date=data.index[0],
@@ -564,10 +569,10 @@ def generate_events_triple_barrier(
     target_params = target_config["params"]
     target = target_func(close=close, **target_params)
 
-    if strategy.get_objective() == "mean_reversion":
-        filter_threshold = target if filter_as_series else target.mean()
-    else:
+    if filter_as_series is None:
         filter_threshold = None
+    else:
+        filter_threshold = target if filter_as_series else target.mean()
 
     side, t_events = get_entries(strategy, data, filter_threshold, on_crossover)
     vb = add_vertical_barrier(t_events, close, **max_holding_period)
