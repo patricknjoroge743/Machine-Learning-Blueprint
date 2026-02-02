@@ -45,6 +45,7 @@ def bet_size_probability(
     """
     signal_0 = get_signal(prob, num_classes, pred)
     events_0 = signal_0.to_frame("signal").join(events["t1"], how="left")
+    
     if average_active:
         signal_1 = avg_active_signals(events_0)
     else:
